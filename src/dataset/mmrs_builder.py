@@ -75,7 +75,7 @@ def build_mmrs_dataset(image_dir: str, mask_dir: str, source: str, img_type: str
     dataset = []
     image_dir, mask_dir = Path(image_dir), Path(mask_dir)
 
-    for img_file in image_dir.glob("*.jpg"):
+    for img_file in image_dir.glob("*.png"):
         mask_file = mask_dir / img_file.name
         if not mask_file.exists():
             continue
@@ -100,7 +100,6 @@ def build_mmrs_dataset(image_dir: str, mask_dir: str, source: str, img_type: str
             "source": source,
         })
 
+    if dataset:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-        df = pd.DataFrame(dataset)
-        df.to_csv(output_file, index=False)
+        pd.DataFrame(dataset).to_csv(output_file, index=False)
