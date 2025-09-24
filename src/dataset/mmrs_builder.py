@@ -6,25 +6,33 @@ import cv2
 import numpy as np
 import pandas as pd
 
-TRAIN_TEMPLATES = pd.read_csv('data/train.csv')
-TEST_TEMPLATES = pd.read_csv('data/test.csv')
+TRAIN_TEMPLATES = pd.read_csv('data/templates/train.csv')
+TEST_TEMPLATES = pd.read_csv('data/templates/test.csv')
 
 
 def extract_positions_from_mask(mask: np.ndarray, center_thresh: float = 0.1) -> list[Any]:
-    height, width = mask.shape
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+
+    height, width = mask_u8.shape
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
 
     positions = []
-    center_x, center_y = width // 2, height // 2
+    center_x, center_y = width / 2.0, height / 2.0
+    near_thresh = center_thresh * np.hypot(width, height)
 
     for contour in contours:
         if cv2.contourArea(contour) < 50:
             continue
 
-        x, y, w, h = cv2.boundingRect(contour)
-        cx, cy = center_y + x, center_y + y
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+        else:
+            x, y, w, h = cv2.boundingRect(contour)
+            cx, cy = x + width / 2.0, y + height / 2.0
 
         if cx < center_x and cy < center_y:
             quadrant = "top left"
@@ -35,8 +43,8 @@ def extract_positions_from_mask(mask: np.ndarray, center_thresh: float = 0.1) ->
         else:
             quadrant = "bottom right"
 
-        distance = np.sqrt((cx - center_x) ** 2 + (cy - center_y) ** 2)
-        if distance < center_thresh:
+        distance = np.hypot(cx - center_x, cy - center_y)
+        if distance < near_thresh:
             pos = f"{quadrant}, near the center"
         else:
             pos = f"{quadrant}"
@@ -63,7 +71,7 @@ def generate_qa_pairs(img_type: str, pos: str):
     return question.format(image_type=img_type), answer.format(position_description=pos, image_type=img_type)
 
 
-def build_mmrs_dataset(image_dir: str, mask_dir: str, img_type: str = "MRI", output_file: str = "data/mmrs/mmrs.csv"):
+def build_mmrs_dataset(image_dir: str, mask_dir: str, source: str, img_type: str = "MRI", output_file: str = "data/mmrs/mmrs.csv"):
     dataset = []
     image_dir, mask_dir = Path(image_dir), Path(mask_dir)
 
@@ -89,6 +97,7 @@ def build_mmrs_dataset(image_dir: str, mask_dir: str, img_type: str = "MRI", out
             "mask": str(mask_file),
             "question": question,
             "answer": answer,
+            "source": source,
         })
 
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
