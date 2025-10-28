@@ -1,0 +1,13 @@
+torch 
+torchvision 
+accelerate 
+transformers 
+timm 
+peft
+segmentation_models_pytorch
+albumentations
+tqdm
+numpy
+scikit-image
+scikit-learn
+pytest
