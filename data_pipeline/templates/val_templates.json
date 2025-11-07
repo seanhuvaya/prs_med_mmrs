@@ -1,8 +1,0 @@
-[
-    {"question":"Can you identify the location of the tumour in this {image_type} medical image?","answer":"The tumour is located in the {position_description} region of the {image_type} image."},
-    {"question":"Please describe the tumour’s position in this medical image of types {image_type}.","answer":"In this {image_type} medical image, the tumour appears in the {position_description}."},
-    {"question":"What is the anatomical location of the tumour in this {image_type} medical image?","answer":"The anatomical position of the tumour in this {image_type} image is {position_description}."},
-    {"question":"Based on this {image_type} medical image, can you provide the location of the tumour in this image?","answer":"From the {image_type} image, the tumour is seen in the {position_description} area."},
-    {"question":"Where is the tumour located in this {image_type} medical image?","answer":"The tumour is situated in the {position_description} part of the {image_type} image."}
-  ]
-  

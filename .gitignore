@@ -2,3 +2,6 @@
 data/**/
 data/.DS_Store
 .DS_Store
+.env
+checkpoints/
+**/__pycache__/
