@@ -332,5 +332,84 @@ def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False):
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved to {checkpoint_path}")
 
+
+def debug_full_pipeline(model, train_loader, device):
+    """Debug the entire pipeline step by step"""
+    print("=== Debugging Full Pipeline ===")
+    model.eval()
+    
+    with torch.no_grad():
+        test_batch = next(iter(train_loader))
+        images = test_batch['image'].to(device)
+        masks = test_batch['mask'].to(device)
+        questions = test_batch['question']
+        
+        print(f"1. Input images: {images.shape}")
+        print(f"2. Input masks: {masks.shape}")
+        
+        # Step 1: Image preprocessing
+        processed_images = model.preprocess_images(images)
+        print(f"3. Processed images: {processed_images.shape}")
+        
+        # Step 2: Vision backbone
+        z_image = model.vision_backbone(processed_images)
+        print(f"4. Vision backbone output: {z_image.shape}")
+        
+        # Step 3: MLLM
+        mllm_output = model.mllm(processed_images, questions, return_projected=True)
+        z_emb = mllm_output["z_emb"]
+        print(f"5. MLLM z_emb: {z_emb.shape}")
+        
+        # Step 4: Fusion module
+        z_fused = model.fusion_module(z_image, z_emb)
+        print(f"6. Fusion output: {z_fused.shape}")
+        
+        # Step 5: Mask prediction
+        z_mask = model.mask_predictor(z_fused)
+        print(f"7. Mask prediction: {z_mask.shape}")
+        
+        # Step 6: Compare with ground truth
+        print(f"8. Ground truth masks: {masks.shape}")
+        
+        # Check if shapes match
+        if z_mask.shape == masks.shape:
+            print("✅ ALL SHAPES MATCH!")
+        else:
+            print(f"❌ SHAPE MISMATCH: Predicted {z_mask.shape} vs Target {masks.shape}")
+            
+            # Check which dimension is wrong
+            for i, (pred_dim, target_dim) in enumerate(zip(z_mask.shape, masks.shape)):
+                if pred_dim != target_dim:
+                    print(f"   Dimension {i}: Predicted {pred_dim} vs Target {target_dim}")
+    
+    print("=== Pipeline Debug Complete ===")
+    return z_mask.shape, masks.shape
+
+
 if __name__ == "__main__":
-    main()
+    # main()
+    args = parse_args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Set default tensor type to float32
+    torch.set_default_dtype(torch.float32)
+    
+    # Create checkpoint directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Initialize data loaders
+    print(f"Loading data from {args.data_root}...")
+    data_loader = PRSMedDataLoader(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        data_root=args.data_root
+    )
+    
+    train_loader = data_loader.get_dataloader('train', shuffle=True)
+    val_loader = data_loader.get_dataloader('val', shuffle=False)
+    
+    model = PRSMedModel(args, device)
+    debug_full_pipeline(model, train_loader, device)

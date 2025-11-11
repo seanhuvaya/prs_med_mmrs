@@ -52,11 +52,17 @@ class MaskPredictionModule(nn.Module):
 
 
 if __name__ == "__main__":
-    B = 2
-    z_fused = torch.randn(B, 256, 16, 16)
-
-    decoder = MaskPredictionModule(in_channels=256)
-    z_mask = decoder(z_fused)
-
-    print(f"Input z_fused: {tuple(z_fused.shape)}")
-    print(f"Output z_mask: {tuple(z_mask.shape)}")
+    model = MaskPredictionModule()
+    
+    # Test input: (batch_size, channels, height, width)
+    test_input = torch.randn(4, 256, 16, 16)
+    output = model(test_input)
+    
+    print(f"Input shape:  {test_input.shape}")
+    print(f"Output shape: {output.shape}")
+    print(f"Expected:     (4, 1, 1024, 1024)")
+    
+    if output.shape == (4, 1, 1024, 1024):
+        print("✅ SUCCESS: Mask prediction module is working correctly!")
+    else:
+        print(f"❌ FAILED: Expected (4, 1, 1024, 1024), got {output.shape}")
