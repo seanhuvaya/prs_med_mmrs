@@ -388,6 +388,10 @@ def debug_full_pipeline(model, train_loader, device):
 
 if __name__ == "__main__":
     # main()
+    torch.set_float32_matmul_precision('high')  # For faster float32 ops
+    torch.set_default_dtype(torch.float32)
+    torch.backends.cuda.matmul.allow_tf32 = True  # For faster float32 ops
+
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -411,6 +415,7 @@ if __name__ == "__main__":
     train_loader = data_loader.get_dataloader('train', shuffle=True)
     val_loader = data_loader.get_dataloader('val', shuffle=False)
     
+
     model = PRSMedModel(args, device)
-    torch.set_default_dtype(torch.float32)
+    
     debug_full_pipeline(model, train_loader, device)
