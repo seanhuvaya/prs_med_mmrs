@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--num_epochs', type=int, default=20)
+    parser.add_argument('--image_size', type=int, default=1024)
     return parser.parse_args()
 
 class PRSMedModel(nn.Module):
