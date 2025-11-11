@@ -8,7 +8,7 @@ from datetime import datetime
 
 # Import all components including vision backbone
 from data.dataset import PRSMedDataLoader
-from models.vision_backbone.tinysam_backbone import TinySAMVisionBackbone  # Add this
+from models.vision_backbone.tiny_sam_encoder import TinySAMVisionBackbone  # Add this
 from models.mllm.llava_med_lora_adapter import LLavaMedWithLoRA
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PRS-Med Training')
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
-    parser.add_argument('--tinysam_checkpoint', type=str, required=True,
+    parser.add_argument('--tinysam_checkpoint', type=str, default='weights/tinysam_42.3.pth',
                        help='Path to TinySAM checkpoint')
     parser.add_argument('--lora_rank', type=int, default=16)
     parser.add_argument('--lora_alpha', type=int, default=16)
