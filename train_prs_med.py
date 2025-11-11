@@ -412,5 +412,5 @@ if __name__ == "__main__":
     val_loader = data_loader.get_dataloader('val', shuffle=False)
     
     model = PRSMedModel(args, device)
-    model.set_default_dtype(torch.float32)
+    torch.set_default_dtype(torch.float32)
     debug_full_pipeline(model, train_loader, device)
