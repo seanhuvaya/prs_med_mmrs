@@ -387,35 +387,35 @@ def debug_full_pipeline(model, train_loader, device):
 
 
 if __name__ == "__main__":
-    # main()
-    torch.set_float32_matmul_precision('high')  # For faster float32 ops
-    torch.set_default_dtype(torch.float32)
-    torch.backends.cuda.matmul.allow_tf32 = True  # For faster float32 ops
+    main()
+    # torch.set_float32_matmul_precision('high')  # For faster float32 ops
+    # torch.set_default_dtype(torch.float32)
+    # torch.backends.cuda.matmul.allow_tf32 = True  # For faster float32 ops
 
-    args = parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # args = parse_args()
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # print(f"Using device: {device}")
 
-    # Set default tensor type to float32
-    torch.set_default_dtype(torch.float32)
+    # # Set default tensor type to float32
+    # torch.set_default_dtype(torch.float32)
     
-    # Create checkpoint directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # # Create checkpoint directory
+    # timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
+    # os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # Initialize data loaders
-    print(f"Loading data from {args.data_root}...")
-    data_loader = PRSMedDataLoader(
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        data_root=args.data_root
-    )
+    # # Initialize data loaders
+    # print(f"Loading data from {args.data_root}...")
+    # data_loader = PRSMedDataLoader(
+    #     batch_size=args.batch_size,
+    #     num_workers=args.num_workers,
+    #     data_root=args.data_root
+    # )
     
-    train_loader = data_loader.get_dataloader('train', shuffle=True)
-    val_loader = data_loader.get_dataloader('val', shuffle=False)
+    # train_loader = data_loader.get_dataloader('train', shuffle=True)
+    # val_loader = data_loader.get_dataloader('val', shuffle=False)
     
 
-    model = PRSMedModel(args, device)
+    # model = PRSMedModel(args, device)
     
-    debug_full_pipeline(model, train_loader, device)
+    # debug_full_pipeline(model, train_loader, device)
