@@ -84,14 +84,14 @@ class PRSMedDataset(Dataset):
 
     def _get_default_transform(self):
         return transforms.Compose([
-            transforms.Resize((256, 256)),
+            transforms.Resize((1024, 1024)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
     def _get_default_mask_transform(self):
         return transforms.Compose([
-            transforms.Resize((256, 256)),
+            transforms.Resize((1024, 1024)),
             transforms.ToTensor(),
         ])
 
