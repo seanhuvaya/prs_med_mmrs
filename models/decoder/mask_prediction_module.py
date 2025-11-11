@@ -5,43 +5,57 @@ import torch.nn.functional as F
 
 class MaskPredictionModule(nn.Module):
     """
-    Upsamples fused representation (B,256,16,16) → (B,1,1024,1024)
-    using stacked ConvTranspose2d + BN + ReLU blocks.
+    Correct implementation that upsamples from (B,256,16,16) → (B,1,1024,1024)
+    Each transpose conv 2x upsampling: 16 → 32 → 64 → 128 → 256 → 512 → 1024
     """
-
-    def __init__(self, in_channels=256, mid_channels=[128, 64, 32, 16, 8, 4], out_channels=1):
+    def __init__(self, in_channels=256, out_channels=1):
         super().__init__()
-
-        layers = []
-        input_c = in_channels
-        for c in mid_channels:
-            layers.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(input_c, c, kernel_size=4, stride=2, padding=1),
-                    nn.BatchNorm2d(c),
-                    nn.ReLU(inplace=True),
-                )
-            )
-            input_c = c
-
-        # Final output layer → 1 channel mask logits
-        layers.append(
-            nn.Conv2d(input_c, out_channels, kernel_size=1)
+        
+        # Calculate the number of upsampling steps needed
+        # Start: 16x16, Target: 1024x1024 → 6 upsampling steps (2^6 = 64x multiplier)
+        self.upsample_blocks = nn.Sequential(
+            # 16x16 → 32x32
+            nn.ConvTranspose2d(in_channels, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            
+            # 32x32 → 64x64
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            # 64x64 → 128x128
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            
+            # 128x128 → 256x256
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            
+            # 256x256 → 512x512
+            nn.ConvTranspose2d(16, 8, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+            
+            # 512x512 → 1024x1024
+            nn.ConvTranspose2d(8, 4, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(4),
+            nn.ReLU(inplace=True),
+            
+            # Final convolution to get 1 channel
+            nn.Conv2d(4, out_channels, kernel_size=1)
         )
-
-        self.upsample_blocks = nn.ModuleList(layers)
 
     def forward(self, z_fused):
         """
         Args:
-            z_fused: (B,256,16,16)
+            z_fused: (B, 256, 16, 16)
         Returns:
-            z_mask: (B,1,1024,1024)
+            z_mask: (B, 1, 1024, 1024)
         """
-        x = z_fused
-        for block in self.upsample_blocks:
-            x = block(x)
-        return x
+        return self.upsample_blocks(z_fused)
 
 if __name__ == "__main__":
     B = 2
