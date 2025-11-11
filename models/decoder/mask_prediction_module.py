@@ -5,15 +5,13 @@ import torch.nn.functional as F
 
 class MaskPredictionModule(nn.Module):
     """
-    Correct implementation that upsamples from (B,256,16,16) → (B,1,1024,1024)
-    Each transpose conv 2x upsampling: 16 → 32 → 64 → 128 → 256 → 512 → 1024
+    CORRECT implementation: (B,256,16,16) → (B,1,1024,1024)
+    16 → 32 → 64 → 128 → 256 → 512 → 1024 (6 upsampling steps)
     """
     def __init__(self, in_channels=256, out_channels=1):
         super().__init__()
         
-        # Calculate the number of upsampling steps needed
-        # Start: 16x16, Target: 1024x1024 → 6 upsampling steps (2^6 = 64x multiplier)
-        self.upsample_blocks = nn.Sequential(
+        self.upsample_layers = nn.Sequential(
             # 16x16 → 32x32
             nn.ConvTranspose2d(in_channels, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(128),
@@ -43,19 +41,15 @@ class MaskPredictionModule(nn.Module):
             nn.ConvTranspose2d(8, 4, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(4),
             nn.ReLU(inplace=True),
-            
-            # Final convolution to get 1 channel
-            nn.Conv2d(4, out_channels, kernel_size=1)
         )
+        
+        self.final_conv = nn.Conv2d(4, out_channels, kernel_size=1)
 
-    def forward(self, z_fused):
-        """
-        Args:
-            z_fused: (B, 256, 16, 16)
-        Returns:
-            z_mask: (B, 1, 1024, 1024)
-        """
-        return self.upsample_blocks(z_fused)
+    def forward(self, x):
+        x = self.upsample_layers(x)
+        x = self.final_conv(x)
+        return x
+
 
 if __name__ == "__main__":
     B = 2
