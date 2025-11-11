@@ -43,22 +43,20 @@ class PromptMaskFusionModule(nn.Module):
     """
     def __init__(self, img_dim=256, emb_dim=4096, fused_dim=256, num_heads=8):
         super().__init__()
-        self.proj_image = nn.Sequential(
-            nn.Conv2d(img_dim, fused_dim, kernel_size=1),
-            nn.GELU(),
-            nn.BatchNorm2d(fused_dim),
+        self.d_k = fused_dim  # scaling factor d_k
+        
+        # Projection layers as in Equation 3
+        self.proj_image = nn.Conv2d(img_dim, fused_dim, 1)  # F_θ1^proj
+        self.proj_text = nn.Linear(emb_dim, fused_dim)      # F_θ2^proj
+        
+        # Self-attention layer as mentioned
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=fused_dim, 
+            num_heads=num_heads, 
+            batch_first=True
         )
-        self.proj_text = nn.Sequential(
-            nn.Linear(emb_dim, fused_dim),
-            nn.GELU(),
-            nn.LayerNorm(fused_dim),
-        )
-        self.cross_attn = CrossAttentionBlock(dim=fused_dim, num_heads=num_heads)
-        self.output_conv = nn.Sequential(
-            nn.Conv2d(fused_dim, fused_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.BatchNorm2d(fused_dim),
-        )
+        
+        self.layer_norm = nn.LayerNorm(fused_dim)
 
     def forward(self, z_image, z_emb):
         """
@@ -70,34 +68,41 @@ class PromptMaskFusionModule(nn.Module):
         """
         B, C, H, W = z_image.shape
         _, L, _ = z_emb.shape
-
-        # FIX: Ensure inputs are on the same device AND dtype as this module
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
         
-        if z_image.device != device or z_image.dtype != dtype:
-            z_image = z_image.to(device=device, dtype=dtype)
-        if z_emb.device != device or z_emb.dtype != dtype:
-            z_emb = z_emb.to(device=device, dtype=dtype)
+        # Ensure device compatibility
+        device = next(self.parameters()).device
+        z_image = z_image.to(device)
+        z_emb = z_emb.to(device)
 
-        # Projection into shared latent space
-        z_image_proj = self.proj_image(z_image)        # (B, 256, 16, 16)
-        z_emb_proj = self.proj_text(z_emb)             # (B, L, 256)
-
-        # Flatten image to tokens
-        z_img_tokens = z_image_proj.flatten(2).permute(0, 2, 1)  # (B, 256, 256)
-
-        # Cross-attention fusion
-        z_fused_tokens = self.cross_attn(z_img_tokens, z_emb_proj)  # (B, 256, 256)
-
-        # Reshape back to spatial map
-        z_fused = z_fused_tokens.permute(0, 2, 1).reshape(B, C, H, W)  # (B, 256, 16, 16)
-
-        # Skip connection
+        # Reshape image to (B, N, C) where N = H*W
+        z_image_flat = z_image.flatten(2).permute(0, 2, 1)  # (B, 256, 256) -> (B, 256, 256)
+        
+        # Project both features to shared space
+        z_img_proj = self.proj_image(z_image).flatten(2).permute(0, 2, 1)  # (B, 256, fused_dim)
+        z_emb_proj = self.proj_text(z_emb)  # (B, L, fused_dim)
+        
+        # Cross-attention mechanism (Equation 3)
+        # Q = image features, K,V = text embeddings
+        attention_weights = F.softmax(
+            torch.bmm(z_img_proj, z_emb_proj.transpose(1, 2)) / (self.d_k ** 0.5), 
+            dim=-1
+        )
+        
+        # Apply attention weights to text features
+        attended_features = torch.bmm(attention_weights, z_emb_proj)  # (B, 256, fused_dim)
+        
+        # Self-attention on the attended features
+        attended_features_norm = self.layer_norm(attended_features)
+        self_attended, _ = self.self_attn(
+            attended_features_norm, attended_features_norm, attended_features_norm
+        )
+        
+        # Reshape back to spatial dimensions
+        z_fused = self_attended.permute(0, 2, 1).reshape(B, C, H, W)
+        
+        # Skip connection (Equation 4)
         z_fused = z_fused + z_image
-
-        # Output refinement
-        z_fused = self.output_conv(z_fused)
+        
         return z_fused
 
 if __name__ == "__main__":
