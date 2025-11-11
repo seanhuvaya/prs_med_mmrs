@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 # Import your custom modules
-from data import PRSMedDataLoader
+from data.dataset import PRSMedDataLoader
 from models.mllm.llava_med_mllm import LLaVAMedMLLM
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
