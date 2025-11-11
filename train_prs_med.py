@@ -29,8 +29,15 @@ class PRSMedModel(nn.Module):
         
         # Add final resize layer to match target size
         self.final_resize = nn.Upsample(size=1024, mode='bilinear', align_corners=False)
+        
+        # Move all components to device
+        self.to(self.device)
 
     def forward(self, images, questions):
+        # Ensure images are on correct device
+        if isinstance(images, torch.Tensor) and images.device != self.device:
+            images = images.to(self.device)
+            
         # Vision + MLLM forward
         z_image = self.encoder(images)
         mllm_out = self.mllm(images, questions, return_projected=True)
@@ -54,6 +61,11 @@ class FixedPRSMedLoss(nn.Module):
         self.txt_loss = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
     def forward(self, z_mask, y_mask, z_txt, y_txt):
+        # FIX: Ensure all tensors are on the same device
+        device = z_mask.device
+        y_mask = y_mask.to(device)
+        y_txt = y_txt.to(device)
+        
         # Handle text sequence length mismatch
         seq_len = z_txt.shape[1]  
         target_len = y_txt.shape[1]  
@@ -122,6 +134,11 @@ def train_prs_med(train_loader, val_loader, device="cpu"):
                 
             images, questions, gt_masks, gt_tokens = batch
 
+            # FIX: Move all input tensors to the same device as model
+            images = images.to(device)
+            gt_masks = gt_masks.to(device)
+            gt_tokens = gt_tokens.to(device)
+
             optimizer.zero_grad()
             outputs = model(images, questions)
             
@@ -153,6 +170,11 @@ def train_prs_med(train_loader, val_loader, device="cpu"):
         val_loss = 0.0
         with torch.no_grad():
             for images, questions, gt_masks, gt_tokens in val_loader:
+                # FIX: Move validation data to device too
+                images = images.to(device)
+                gt_masks = gt_masks.to(device)
+                gt_tokens = gt_tokens.to(device)
+                
                 outputs = model(images, questions)
                 losses = criterion(
                     z_mask=outputs["z_mask"],
