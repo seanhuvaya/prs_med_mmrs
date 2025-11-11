@@ -192,6 +192,6 @@ if __name__ == "__main__":
     ]
     loader = DataLoader(dataset, batch_size=1)
 
-    device = "cpu"
-    print("🚨 Using CPU for stability")
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    print(f"Using {device} device")
     train_prs_med(loader, loader, device=device)
