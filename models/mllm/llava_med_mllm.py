@@ -122,6 +122,11 @@ class LLavaMedMLLM(nn.Module):
             return_tensors="pt", 
             padding=True
         ).to(self.device)
+        
+        # FIX: Convert inputs to match model dtype
+        model_dtype = next(self.model.parameters()).dtype
+        inputs = {k: v.to(dtype=model_dtype) if v.dtype.is_floating_point else v 
+                for k, v in inputs.items()}
 
         with torch.set_grad_enabled(self.training):
             outputs = self.model(**inputs, output_hidden_states=True)
@@ -140,6 +145,9 @@ class LLavaMedMLLM(nn.Module):
         out = {"z_emb": z_emb, "z_txt": z_txt, "pred_ids": pred_ids, "inputs": inputs}
 
         if return_projected and z_emb is not None:
+            # FIX: Ensure z_emb matches the projection layer dtype
+            if z_emb.dtype != next(self.to_seg_channels.parameters()).dtype:
+                z_emb = z_emb.to(next(self.to_seg_channels.parameters()).dtype)
             z_emb_proj = self.to_seg_channels(z_emb)
             out["z_emb_proj"] = z_emb_proj
 
