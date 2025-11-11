@@ -9,7 +9,7 @@ from datetime import datetime
 
 # Import your custom modules
 from data.dataset import PRSMedDataLoader
-from models.mllm.llava_med_mllm import LLaVAMedMLLM
+from models.mllm.llava_med_lora_adapter import LLavaMedWithLoRA
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
 from models.loss.objective_function import PRSMedLoss
@@ -97,9 +97,9 @@ def main():
     
     # Create model
     print("Initializing models...")
-    mllm = LLaVAMedMLLM().to(device)
-    fusion_module = PromptMaskFusionModule().to(device)
-    decoder = MaskPredictionModule().to(device)
+    mllm = LLavaMedWithLoRA().to(device)
+    fusion_module = PromptMaskFusionModule(img_dim=256, emb_dim=4096, fused_dim=256, num_heads=8).to(device)
+    decoder = MaskPredictionModule(in_channels=256).to(device)
     
     # Create optimizer
     optimizer = optim.AdamW(
