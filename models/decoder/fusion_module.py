@@ -71,12 +71,14 @@ class PromptMaskFusionModule(nn.Module):
         B, C, H, W = z_image.shape
         _, L, _ = z_emb.shape
 
-        # FIX: Ensure inputs are on the same device as this module
+        # FIX: Ensure inputs are on the same device AND dtype as this module
         device = next(self.parameters()).device
-        if z_image.device != device:
-            z_image = z_image.to(device)
-        if z_emb.device != device:
-            z_emb = z_emb.to(device)
+        dtype = next(self.parameters()).dtype
+        
+        if z_image.device != device or z_image.dtype != dtype:
+            z_image = z_image.to(device=device, dtype=dtype)
+        if z_emb.device != device or z_emb.dtype != dtype:
+            z_emb = z_emb.to(device=device, dtype=dtype)
 
         # Projection into shared latent space
         z_image_proj = self.proj_image(z_image)        # (B, 256, 16, 16)
