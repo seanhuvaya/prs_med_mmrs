@@ -6,7 +6,12 @@ class CrossAttentionBlock(nn.Module):
     """Cross-attention between vision tokens (query) and multimodal tokens (key/value)."""
     def __init__(self, dim=256, num_heads=8, dropout=0.1):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, 
+            num_heads=num_heads, 
+            dropout=dropout, 
+            batch_first=True
+        )
         self.norm1 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * 4),
@@ -21,6 +26,10 @@ class CrossAttentionBlock(nn.Module):
         q: (B, N, C) vision tokens
         kv: (B, L, C) multimodal tokens
         """
+        # Ensure same dtype
+        if q.dtype != kv.dtype:
+            kv = kv.to(q.dtype)
+            
         # Layer norm before attention
         q_norm = self.norm1(q)
         kv_norm = self.norm1(kv)
@@ -36,85 +45,91 @@ class CrossAttentionBlock(nn.Module):
 
 class PromptMaskFusionModule(nn.Module):
     """
-    Implements the Fusion Module:
-      - Aligns z_image and z_emb to shared space
-      - Applies cross-attention
-      - Adds skip connection
+    Implements the Fusion Module with proper dtype handling
     """
     def __init__(self, img_dim=256, emb_dim=4096, fused_dim=256, num_heads=8):
         super().__init__()
-        self.d_k = fused_dim  # scaling factor d_k
+        self.img_dim = img_dim
+        self.emb_dim = emb_dim
+        self.fused_dim = fused_dim
         
-        # Projection layers as in Equation 3
-        self.proj_image = nn.Conv2d(img_dim, fused_dim, 1)  # F_θ1^proj
-        self.proj_text = nn.Linear(emb_dim, fused_dim)      # F_θ2^proj
-        
-        # Self-attention layer as mentioned
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=fused_dim, 
-            num_heads=num_heads, 
-            batch_first=True
+        # Projection layers
+        self.proj_image = nn.Sequential(
+            nn.Conv2d(img_dim, fused_dim, kernel_size=1),
+            nn.GELU(),
+            nn.BatchNorm2d(fused_dim),
         )
-        
-        self.layer_norm = nn.LayerNorm(fused_dim)
+        self.proj_text = nn.Sequential(
+            nn.Linear(emb_dim, fused_dim),
+            nn.GELU(),
+            nn.LayerNorm(fused_dim),
+        )
+        self.cross_attn = CrossAttentionBlock(dim=fused_dim, num_heads=num_heads)
+        self.output_conv = nn.Sequential(
+            nn.Conv2d(fused_dim, fused_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.BatchNorm2d(fused_dim),
+        )
 
     def forward(self, z_image, z_emb):
         """
         Args:
-            z_image: (B, 256, 16, 16)
-            z_emb:   (B, L, 4096)
+            z_image: (B, 256, 16, 16) - from TinySAM
+            z_emb:   (B, L, 4096) - from LLaVA-Med (could be float16)
         Returns:
             z_fused: (B, 256, 16, 16)
         """
         B, C, H, W = z_image.shape
         _, L, _ = z_emb.shape
-        
-        # Ensure device compatibility
-        device = next(self.parameters()).device
-        z_image = z_image.to(device)
-        z_emb = z_emb.to(device)
 
-        # Reshape image to (B, N, C) where N = H*W
-        z_image_flat = z_image.flatten(2).permute(0, 2, 1)  # (B, 256, 256) -> (B, 256, 256)
+        # Ensure both inputs are on the same device and dtype
+        device = next(self.parameters()).device
         
-        # Project both features to shared space
-        z_img_proj = self.proj_image(z_image).flatten(2).permute(0, 2, 1)  # (B, 256, fused_dim)
-        z_emb_proj = self.proj_text(z_emb)  # (B, L, fused_dim)
-        
-        # Cross-attention mechanism (Equation 3)
-        # Q = image features, K,V = text embeddings
-        attention_weights = F.softmax(
-            torch.bmm(z_img_proj, z_emb_proj.transpose(1, 2)) / (self.d_k ** 0.5), 
-            dim=-1
-        )
-        
-        # Apply attention weights to text features
-        attended_features = torch.bmm(attention_weights, z_emb_proj)  # (B, 256, fused_dim)
-        
-        # Self-attention on the attended features
-        attended_features_norm = self.layer_norm(attended_features)
-        self_attended, _ = self.self_attn(
-            attended_features_norm, attended_features_norm, attended_features_norm
-        )
-        
-        # Reshape back to spatial dimensions
-        z_fused = self_attended.permute(0, 2, 1).reshape(B, C, H, W)
-        
-        # Skip connection (Equation 4)
+        # Move inputs to correct device if needed
+        if z_image.device != device:
+            z_image = z_image.to(device)
+        if z_emb.device != device:
+            z_emb = z_emb.to(device)
+            
+        # Convert both to float32 for stability (or match z_image's dtype)
+        target_dtype = z_image.dtype
+        if z_emb.dtype != target_dtype:
+            z_emb = z_emb.to(target_dtype)
+
+        # Projection into shared latent space
+        z_image_proj = self.proj_image(z_image)        # (B, 256, 16, 16)
+        z_emb_proj = self.proj_text(z_emb)             # (B, L, 256)
+
+        # Flatten image to tokens
+        z_img_tokens = z_image_proj.flatten(2).permute(0, 2, 1)  # (B, 256, 256) -> (B, 256, 256)
+
+        # Cross-attention fusion
+        z_fused_tokens = self.cross_attn(z_img_tokens, z_emb_proj)  # (B, 256, 256)
+
+        # Reshape back to spatial map
+        z_fused = z_fused_tokens.permute(0, 2, 1).reshape(B, self.fused_dim, H, W)  # (B, 256, 16, 16)
+
+        # Skip connection (ensure same dtype)
+        if z_fused.dtype != z_image.dtype:
+            z_fused = z_fused.to(z_image.dtype)
+            
         z_fused = z_fused + z_image
-        
+
+        # Output refinement
+        z_fused = self.output_conv(z_fused)
         return z_fused
 
 if __name__ == "__main__":
-    print("Testing PromptMaskFusionModule ...")
+    print("Testing PromptMaskFusionModule with mixed precision...")
 
     B, L, H, W = 2, 595, 16, 16
-    z_image = torch.randn(B, 256, H, W)
-    z_emb = torch.randn(B, L, 4096)
+    # Simulate mixed precision inputs
+    z_image = torch.randn(B, 256, H, W, dtype=torch.float32)  # TinySAM output (float32)
+    z_emb = torch.randn(B, L, 4096, dtype=torch.float16)      # LLaVA-Med output (float16)
 
     fusion = PromptMaskFusionModule(img_dim=256, emb_dim=4096, fused_dim=256, num_heads=8)
     out = fusion(z_image, z_emb)
 
-    print(f"Input z_image: {tuple(z_image.shape)}")
-    print(f"Input z_emb:   {tuple(z_emb.shape)}")
-    print(f"Output z_fused: {tuple(out.shape)}")
+    print(f"Input z_image: {tuple(z_image.shape)}, dtype: {z_image.dtype}")
+    print(f"Input z_emb:   {tuple(z_emb.shape)}, dtype: {z_emb.dtype}")
+    print(f"Output z_fused: {tuple(out.shape)}, dtype: {out.dtype}")
