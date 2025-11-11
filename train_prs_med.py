@@ -160,29 +160,13 @@ def main():
     print(f"Validation samples: {len(val_loader.dataset)}")
     
     # Initialize complete PRS-Med model
-    print("Initializing PRS-Med model...")
     model = PRSMedModel(args, device)
-    
-    # Test forward pass
-    print("Testing forward pass...")
-    model.eval()
-    with torch.no_grad():
-        test_batch = next(iter(train_loader))
-        images = test_batch['image'].to(device)
-        questions = test_batch['question']
-        
-        outputs = model(images, questions)
-        print(f"Segmentation output: {outputs['z_mask'].shape}")
-        print(f"Text logits: {outputs['z_txt_logits'].shape}")
-        print(f"Predicted IDs: {outputs['pred_ids'].shape}")
-        print("Forward pass test successful!")
     
     # Setup optimizer and loss
     trainable_params = []
     for name, param in model.named_parameters():
         if param.requires_grad:
             trainable_params.append(param)
-            print(f"Training parameter: {name}")
     
     optimizer = optim.AdamW(trainable_params, lr=args.learning_rate)
     criterion = PRSMedLoss(lambda_seg=args.lambda_seg, lambda_txt=args.lambda_txt)

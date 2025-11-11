@@ -60,31 +60,23 @@ class PRSMedLoss(nn.Module):
         B, L, V = z_txt.shape
         B_target, L_target = y_txt.shape
         
-        print(f"Text loss debug: z_txt {z_txt.shape}, y_txt {y_txt.shape}")
-        
         # Ensure batch sizes match
         if B != B_target:
-            print(f"⚠️  Batch size mismatch: z_txt {B} vs y_txt {B_target}")
             # Use the smaller batch size
             min_batch = min(B, B_target)
             z_txt = z_txt[:min_batch]
             y_txt = y_txt[:min_batch]
-            print(f"   Using batch size: {min_batch}")
         
         # Ensure sequence lengths match
         if L != L_target:
-            print(f"⚠️  Sequence length mismatch: z_txt {L} vs y_txt {L_target}")
             # Use the minimum sequence length
             min_seq = min(L, L_target)
             z_txt = z_txt[:, :min_seq, :]
             y_txt = y_txt[:, :min_seq]
-            print(f"   Using sequence length: {min_seq}")
         
         # Reshape for cross entropy: (B * L, V) and (B * L)
         z_txt_flat = z_txt.reshape(-1, V)
         y_txt_flat = y_txt.reshape(-1)
-        
-        print(f"Text loss final: z_txt_flat {z_txt_flat.shape}, y_txt_flat {y_txt_flat.shape}")
         
         loss_txt = self.ce(z_txt_flat, y_txt_flat)
 

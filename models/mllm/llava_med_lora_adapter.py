@@ -39,7 +39,6 @@ class LLavaMedWithLoRA(LLavaMedMLLM):
             task_type=TaskType.CAUSAL_LM,
         )
         
-        print(f"[INFO] Applying LoRA: r={rank}, alpha={alpha}, dropout={dropout}")
         self.model = get_peft_model(self.model, self.lora_config)
         self.model.print_trainable_parameters()
 
