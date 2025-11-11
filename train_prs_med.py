@@ -34,21 +34,21 @@ def parse_args():
 
 class PRSMedModel(nn.Module):
     """
-    Complete PRS-Med model with proper dtype handling
+    Complete PRS-Med model with explicit dtype handling
     """
     def __init__(self, args, device):
         super().__init__()
         self.device = device
         self.image_size = args.image_size
         
-        # Vision backbone (TinySAM) - typically float32
+        # Vision backbone (TinySAM)
         self.vision_backbone = TinySAMVisionBackbone(
             checkpoint_path=args.tinysam_checkpoint,
             image_size=args.image_size,
             device=str(device)
         )
         
-        # Multimodal LLM with LoRA - might use mixed precision
+        # Multimodal LLM with LoRA
         self.mllm = LLavaMedWithLoRA(
             rank=args.lora_rank,
             alpha=args.lora_alpha,
@@ -57,13 +57,13 @@ class PRSMedModel(nn.Module):
             device=str(device)
         )
         
-        # Fusion and mask modules
-        self.fusion_module = PromptMaskFusionModule().to(device)
-        self.mask_predictor = MaskPredictionModule().to(device)
+        # Fusion and mask modules - explicitly set to float32
+        self.fusion_module = PromptMaskFusionModule().to(device).float()
+        self.mask_predictor = MaskPredictionModule().to(device).float()
         
     def preprocess_images(self, images):
         """
-        Preprocess images for TinySAM backbone
+        Preprocess images and ensure float32
         """
         # If images are already tensors, ensure they're the right size
         if isinstance(images, torch.Tensor):
@@ -85,25 +85,26 @@ class PRSMedModel(nn.Module):
                 std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
                 images = (images - mean) / std
         
-        return images
+        # Ensure float32
+        return images.float()
         
     def forward(self, images, text_prompts):
         """
-        Proper forward pass with dtype consistency
+        Forward pass with explicit dtype conversion
         """
-        # Preprocess images for TinySAM
+        # Preprocess images and ensure float32
         processed_images = self.preprocess_images(images)
         
-        # 1. Extract visual features using TinySAM (float32)
-        z_image = self.vision_backbone(processed_images)  # (B, 256, 16, 16) - float32
+        # 1. Extract visual features using TinySAM (ensure float32)
+        z_image = self.vision_backbone(processed_images).float()  # (B, 256, 16, 16)
         
-        # 2. Get multimodal embeddings from LLaVA-Med (might be float16)
+        # 2. Get multimodal embeddings from LLaVA-Med and convert to float32
         mllm_output = self.mllm(processed_images, text_prompts, return_projected=True)
-        z_emb = mllm_output["z_emb"]      # (B, L, 4096) - could be float16
-        z_txt_logits = mllm_output["z_txt"] # (B, L, vocab_size)
-        pred_ids = mllm_output["pred_ids"]  # (B, L)
+        z_emb = mllm_output["z_emb"].float()      # Convert to float32
+        z_txt_logits = mllm_output["z_txt"].float() # Convert to float32
+        pred_ids = mllm_output["pred_ids"]
         
-        # 3. Fuse visual and multimodal features (handles dtype conversion internally)
+        # 3. Fuse visual and multimodal features
         z_fused = self.fusion_module(z_image, z_emb)  # (B, 256, 16, 16)
         
         # 4. Generate segmentation mask

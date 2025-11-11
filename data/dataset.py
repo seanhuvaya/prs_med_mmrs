@@ -117,8 +117,8 @@ class PRSMedDataset(Dataset):
         mask = self.mask_transform(mask)
         
         return {
-            'image': image,
-            'mask': mask,
+            'image': image.float(),
+            'mask': mask.float(),
             'question': row["question"],
             'answer': row["answer"],
             'dataset': row['dataset_name'],
