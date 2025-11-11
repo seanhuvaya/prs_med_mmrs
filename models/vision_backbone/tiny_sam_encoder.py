@@ -59,8 +59,8 @@ class TinySAMVisionBackbone(nn.Module):
             z_image = torch.nn.functional.adaptive_avg_pool2d(z_image, (16, 16))
         elif z_image.shape[-2:] != (16, 16):
             # Fallback: ensure we get 16x16
-            z_image = torch.nn.functional.adaptive_avg_pool2d(z_image, (16, 16)
-            
+            z_image = torch.nn.functional.adaptive_avg_pool2d(z_image, (16, 16))
+
         return z_image
 
 if __name__ == "__main__":
