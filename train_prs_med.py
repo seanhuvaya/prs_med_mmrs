@@ -3,7 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from data import PRSMedDataLoader
+from data.dataset import PRSMedDataLoader
 from models.mllm.llava_med_lora_adapter import LLavaMedWithLoRA
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
@@ -11,7 +11,7 @@ from models.loss.objective_function import PRSMedLoss
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--data_root', type=str, default="/Users/seanhuvaya/Documents/Capstone Project/sample/data")
     args = parser.parse_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -21,7 +21,7 @@ def main():
     os.makedirs('checkpoints', exist_ok=True)
     
     # Initialize data and models
-    data_loader = PRSMedDataLoader(data_root=args.data_root)
+    data_loader = PRSMedDataLoader(batch_size=8, num_workers=2, data_root=args.data_root)
     train_loader = data_loader.get_dataloader('train')
     
     # Initialize LLaVA-Med with LoRA
