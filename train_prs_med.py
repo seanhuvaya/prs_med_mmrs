@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--num_epochs', type=int, default=20)
     parser.add_argument('--image_size', type=int, default=1024)
+    parser.add_argument('--num_workers', type=int, default=2)
     return parser.parse_args()
 
 class PRSMedModel(nn.Module):
@@ -135,6 +136,9 @@ def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+
+    # Set default tensor type to float32
+    torch.set_default_dtype(torch.float32)
     
     # Create checkpoint directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -145,7 +149,7 @@ def main():
     print(f"Loading data from {args.data_root}...")
     data_loader = PRSMedDataLoader(
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=args.num_workers,
         data_root=args.data_root
     )
     
