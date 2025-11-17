@@ -83,11 +83,14 @@ class PRSMedModel(nn.Module):
         self.image_size = args.image_size
         
         # Vision backbone (TinySAM)
+        # Note: We'll move it to device after creation to ensure all submodules are on the same device
         self.vision_backbone = TinySAMVisionBackbone(
             checkpoint_path=args.tinysam_checkpoint,
             image_size=args.image_size,
             device=str(device)
         )
+        # Explicitly move to device to ensure all submodules are on the correct device
+        self.vision_backbone = self.vision_backbone.to(device)
         
         # Multimodal LLM with LoRA
         self.mllm = LLavaMedWithLoRA(
@@ -97,6 +100,8 @@ class PRSMedModel(nn.Module):
             freeze_llm=True,
             device=str(device)
         )
+        # Explicitly move to device to ensure all submodules are on the correct device
+        self.mllm = self.mllm.to(device)
         
         # Fusion and mask modules - explicitly set to float32
         self.fusion_module = PromptMaskFusionModule().to(device).float()
@@ -131,13 +136,23 @@ class PRSMedModel(nn.Module):
         
     def forward(self, images, text_prompts):
         """
-        Forward pass with explicit dtype conversion
+        Forward pass with explicit dtype conversion and device checking
         """
+        # Ensure input images are on the correct device
+        if isinstance(images, torch.Tensor) and images.device != self.device:
+            images = images.to(self.device)
+        
         # Preprocess images and ensure float32
         processed_images = self.preprocess_images(images)
         
+        # Ensure processed images are on the correct device
+        if processed_images.device != self.device:
+            processed_images = processed_images.to(self.device)
+        
         # 1. Extract visual features using TinySAM (ensure float32)
         z_image = self.vision_backbone(processed_images).float()  # (B, 256, 16, 16)
+        if z_image.device != self.device:
+            z_image = z_image.to(self.device)
         
         # 2. Get multimodal embeddings from LLaVA-Med and convert to float32
         mllm_output = self.mllm(processed_images, text_prompts, return_projected=True)
@@ -145,11 +160,21 @@ class PRSMedModel(nn.Module):
         z_txt_logits = mllm_output["z_txt"].float() # Convert to float32
         pred_ids = mllm_output["pred_ids"]
         
+        # Ensure all outputs are on the correct device
+        if z_emb.device != self.device:
+            z_emb = z_emb.to(self.device)
+        if z_txt_logits.device != self.device:
+            z_txt_logits = z_txt_logits.to(self.device)
+        
         # 3. Fuse visual and multimodal features
         z_fused = self.fusion_module(z_image, z_emb)  # (B, 256, 16, 16)
+        if z_fused.device != self.device:
+            z_fused = z_fused.to(self.device)
         
         # 4. Generate segmentation mask
         z_mask = self.mask_predictor(z_fused)  # (B, 1, 1024, 1024)
+        if z_mask.device != self.device:
+            z_mask = z_mask.to(self.device)
         
         return {
             "z_mask": z_mask,        # Segmentation logits
@@ -219,19 +244,50 @@ def ensure_model_on_device(model, device):
     Ensure all model parameters and buffers are on the specified device.
     This is critical for DDP which requires all parameters on the same device.
     """
+    # First, move the entire model to the device (this should move all submodules)
     model = model.to(device)
     
     # Double-check all parameters are on the correct device
+    wrong_device_params = []
     for name, param in model.named_parameters():
         if param.device != device:
-            print(f"WARNING: Parameter {name} is on {param.device}, moving to {device}")
-            param.data = param.data.to(device)
+            wrong_device_params.append((name, param.device))
+            # Try to move the parameter
+            with torch.no_grad():
+                param.data = param.data.to(device)
+            # Also move the parameter itself if it's a leaf
+            if param.is_leaf:
+                param.data = param.data.to(device)
     
     # Also check buffers
+    wrong_device_buffers = []
     for name, buffer in model.named_buffers():
         if buffer.device != device:
-            print(f"WARNING: Buffer {name} is on {buffer.device}, moving to {device}")
+            wrong_device_buffers.append((name, buffer.device))
             buffer.data = buffer.data.to(device)
+    
+    # Print warnings if any were found
+    if wrong_device_params:
+        print(f"WARNING: Found {len(wrong_device_params)} parameters on wrong device:")
+        for name, dev in wrong_device_params[:10]:  # Print first 10
+            print(f"  {name}: {dev}")
+        if len(wrong_device_params) > 10:
+            print(f"  ... and {len(wrong_device_params) - 10} more")
+    
+    if wrong_device_buffers:
+        print(f"WARNING: Found {len(wrong_device_buffers)} buffers on wrong device:")
+        for name, dev in wrong_device_buffers[:10]:  # Print first 10
+            print(f"  {name}: {dev}")
+        if len(wrong_device_buffers) > 10:
+            print(f"  ... and {len(wrong_device_buffers) - 10} more")
+    
+    # Final verification - recursively check all submodules
+    for name, module in model.named_modules():
+        if hasattr(module, 'to'):
+            try:
+                module = module.to(device)
+            except:
+                pass
     
     return model
 
@@ -356,6 +412,14 @@ def main():
         print(f"Validation samples: {len(val_dataset)}")
         print(f"Effective batch size: {args.batch_size * args.world_size if is_distributed else args.batch_size}")
     
+    # CRITICAL: Set the default CUDA device before creating the model
+    # This ensures all new tensors/modules are created on the correct device
+    if is_distributed and torch.cuda.is_available():
+        torch.cuda.set_device(args.local_rank)
+        # Verify the default device is set correctly
+        if torch.cuda.current_device() != args.local_rank:
+            raise RuntimeError(f"Failed to set CUDA device to {args.local_rank}. Current device: {torch.cuda.current_device()}")
+    
     # Initialize complete PRS-Med model
     model = PRSMedModel(args, device)
     
@@ -383,6 +447,31 @@ def main():
     
     # Wrap model with DDP if using distributed training
     if is_distributed:
+        # Final check: verify all parameters are on the correct device before DDP
+        param_devices = set()
+        for name, param in model.named_parameters():
+            param_devices.add(param.device)
+        
+        if len(param_devices) > 1:
+            print(f"ERROR before DDP: Model parameters are on multiple devices: {param_devices}")
+            print("Attempting to fix by moving all parameters to device:", device)
+            # Try one more time to move everything
+            model = ensure_model_on_device(model, device)
+            # Check again
+            param_devices = set()
+            for name, param in model.named_parameters():
+                param_devices.add(param.device)
+            if len(param_devices) > 1:
+                raise RuntimeError(
+                    f"Cannot wrap model with DDP: parameters are on multiple devices {param_devices}. "
+                    f"Expected all on {device}. This usually means some model components are creating "
+                    f"tensors on the default CUDA device instead of the assigned device."
+                )
+        
+        if is_main_process():
+            print(f"✓ All parameters verified on device: {list(param_devices)[0]}")
+            print(f"Wrapping model with DDP on device {args.local_rank}...")
+        
         # For DDP, we need to ensure the model is on the correct device
         # and pass the device_ids parameter correctly
         # When model is already on device, we can use device_ids=[args.local_rank]
