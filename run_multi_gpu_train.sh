@@ -13,9 +13,9 @@ if ! command -v nvidia-smi &> /dev/null; then
     exit 1
 fi
 
-# Check if torchrun is available
-if ! command -v torchrun &> /dev/null; then
-    echo "Error: torchrun not found. Please install PyTorch with distributed support."
+# Check if uv is available
+if ! command -v uv &> /dev/null; then
+    echo "Error: uv not found. Please install uv: https://github.com/astral-sh/uv"
     exit 1
 fi
 
@@ -23,8 +23,8 @@ echo "Starting multi-GPU training with $NUM_GPUS GPUs"
 echo "Data root: $DATA_ROOT"
 echo ""
 
-# Run training with torchrun
-torchrun \
+# Run training with uv and torch.distributed.run
+uv run python -m torch.distributed.run \
     --nproc_per_node=$NUM_GPUS \
     --nnodes=1 \
     --node_rank=0 \
