@@ -214,6 +214,27 @@ def is_main_process():
     """Check if this is the main process (rank 0)"""
     return not dist.is_initialized() or dist.get_rank() == 0
 
+def ensure_model_on_device(model, device):
+    """
+    Ensure all model parameters and buffers are on the specified device.
+    This is critical for DDP which requires all parameters on the same device.
+    """
+    model = model.to(device)
+    
+    # Double-check all parameters are on the correct device
+    for name, param in model.named_parameters():
+        if param.device != device:
+            print(f"WARNING: Parameter {name} is on {param.device}, moving to {device}")
+            param.data = param.data.to(device)
+    
+    # Also check buffers
+    for name, buffer in model.named_buffers():
+        if buffer.device != device:
+            print(f"WARNING: Buffer {name} is on {buffer.device}, moving to {device}")
+            buffer.data = buffer.data.to(device)
+    
+    return model
+
 def prepare_text_targets(answers, tokenizer, max_length=512):
     """
     Properly tokenize answers for text generation loss
@@ -245,6 +266,7 @@ def main():
     is_distributed = init_distributed(args)
     
     # Set device based on distributed setup
+    # Note: torch.cuda.set_device is already called in init_distributed
     if is_distributed:
         device = torch.device(f'cuda:{args.local_rank}')
         if is_main_process():
@@ -254,6 +276,9 @@ def main():
     
     if is_main_process():
         print(f"Using device: {device}")
+        if is_distributed:
+            print(f"Local rank: {args.local_rank}, Global rank: {args.rank}")
+            print(f"Current CUDA device: {torch.cuda.current_device()}")
     
     # Set random seed for reproducibility (must be done before any other operations)
     # Add rank to seed to ensure different random states across processes
@@ -334,8 +359,33 @@ def main():
     # Initialize complete PRS-Med model
     model = PRSMedModel(args, device)
     
+    # Ensure all model parameters are on the correct device
+    # This is critical for DDP - all parameters must be on the same device
+    model = ensure_model_on_device(model, device)
+    
+    # Verify all parameters are on the correct device (for debugging)
+    if is_main_process():
+        param_devices = set()
+        for name, param in model.named_parameters():
+            param_devices.add(param.device)
+        if len(param_devices) > 1:
+            print(f"ERROR: Model parameters are still on multiple devices: {param_devices}")
+            print("This should not happen after ensure_model_on_device. Attempting to fix...")
+            model = ensure_model_on_device(model, device)
+            # Check again
+            param_devices = set()
+            for name, param in model.named_parameters():
+                param_devices.add(param.device)
+            if len(param_devices) > 1:
+                raise RuntimeError(f"Failed to move all parameters to {device}. Parameters still on: {param_devices}")
+        else:
+            print(f"✓ All model parameters are on device: {list(param_devices)[0]}")
+    
     # Wrap model with DDP if using distributed training
     if is_distributed:
+        # For DDP, we need to ensure the model is on the correct device
+        # and pass the device_ids parameter correctly
+        # When model is already on device, we can use device_ids=[args.local_rank]
         model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
         model_for_saving = model.module  # Access underlying model for saving
     else:
