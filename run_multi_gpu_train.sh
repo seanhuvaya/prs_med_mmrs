@@ -23,13 +23,27 @@ echo "Starting multi-GPU training with $NUM_GPUS GPUs"
 echo "Data root: $DATA_ROOT"
 echo ""
 
+# Check if data root exists
+if [ ! -d "$DATA_ROOT" ]; then
+    echo "Error: Data root directory '$DATA_ROOT' does not exist."
+    exit 1
+fi
+
+# Enable full error tracebacks for distributed training
+export TORCHELASTIC_ERROR_FILE=./logs/error_$(date +%Y%m%d_%H%M%S).json
+
+# Create logs directory if it doesn't exist
+mkdir -p ./logs
+
 # Run training with uv and torch.distributed.run
+# --log_dir enables error logging
 uv run python -m torch.distributed.run \
     --nproc_per_node=$NUM_GPUS \
     --nnodes=1 \
     --node_rank=0 \
     --master_addr=localhost \
     --master_port=29500 \
+    --log_dir=./logs \
     train_prs_med.py \
     --data_root "$DATA_ROOT" \
     --batch_size 8 \

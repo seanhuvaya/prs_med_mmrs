@@ -8,9 +8,11 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 import numpy as np
+import traceback
+import sys
 
 # Import all components including vision backbone
 from data.dataset import PRSMedDataLoader
@@ -160,13 +162,19 @@ def init_distributed(args):
     Initialize distributed training environment.
     Returns True if distributed training is enabled, False otherwise.
     """
+    # Check if we're in a distributed environment
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        # Using torchrun or similar
+        # Using torchrun or torch.distributed.run
         args.rank = int(os.environ['RANK'])
         args.world_size = int(os.environ['WORLD_SIZE'])
+        args.local_rank = int(os.environ.get('LOCAL_RANK', os.environ.get('RANK', 0)))
+    elif 'LOCAL_RANK' in os.environ:
+        # Fallback: check LOCAL_RANK directly
         args.local_rank = int(os.environ['LOCAL_RANK'])
+        args.rank = int(os.environ.get('RANK', args.local_rank))
+        args.world_size = int(os.environ.get('WORLD_SIZE', 1))
     elif args.local_rank != -1:
-        # Using torch.distributed.launch
+        # Using torch.distributed.launch (legacy)
         args.rank = int(os.environ.get('RANK', args.local_rank))
         args.world_size = int(os.environ.get('WORLD_SIZE', 1))
         args.local_rank = args.local_rank
@@ -178,15 +186,22 @@ def init_distributed(args):
         return False
     
     # Initialize the process group
-    dist.init_process_group(
-        backend='nccl' if torch.cuda.is_available() else 'gloo',
-        init_method=args.dist_url,
-        world_size=args.world_size,
-        rank=args.rank
-    )
+    try:
+        dist.init_process_group(
+            backend='nccl' if torch.cuda.is_available() else 'gloo',
+            init_method=args.dist_url,
+            world_size=args.world_size,
+            rank=args.rank,
+            timeout=timedelta(seconds=1800)  # 30 minute timeout
+        )
+    except Exception as e:
+        print(f"Error initializing process group: {e}")
+        print(f"RANK={args.rank}, WORLD_SIZE={args.world_size}, LOCAL_RANK={args.local_rank}")
+        raise
     
     # Set the device for this process
-    torch.cuda.set_device(args.local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(args.local_rank)
     
     return True
 
@@ -216,6 +231,15 @@ def prepare_text_targets(answers, tokenizer, max_length=512):
 
 def main():
     args = parse_args()
+    
+    # Print environment info for debugging (only on main process after init)
+    if 'RANK' in os.environ or 'LOCAL_RANK' in os.environ:
+        print(f"Distributed environment detected:")
+        print(f"  RANK: {os.environ.get('RANK', 'N/A')}")
+        print(f"  WORLD_SIZE: {os.environ.get('WORLD_SIZE', 'N/A')}")
+        print(f"  LOCAL_RANK: {os.environ.get('LOCAL_RANK', 'N/A')}")
+        print(f"  MASTER_ADDR: {os.environ.get('MASTER_ADDR', 'N/A')}")
+        print(f"  MASTER_PORT: {os.environ.get('MASTER_PORT', 'N/A')}")
     
     # Initialize distributed training
     is_distributed = init_distributed(args)
@@ -566,7 +590,25 @@ def debug_full_pipeline(model, train_loader, device):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"ERROR: Training failed with exception:")
+        print(f"{'='*60}")
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception message: {str(e)}")
+        print(f"\nFull traceback:")
+        traceback.print_exc()
+        print(f"{'='*60}\n")
+        
+        # Clean up distributed training if it was initialized
+        try:
+            cleanup_distributed()
+        except:
+            pass
+        
+        sys.exit(1)
     # torch.set_float32_matmul_precision('high')  # For faster float32 ops
     # torch.set_default_dtype(torch.float32)
     # torch.backends.cuda.matmul.allow_tf32 = True  # For faster float32 ops
