@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 import time
 from datetime import datetime
 import random
@@ -50,7 +53,8 @@ def parse_args():
     parser.add_argument('--lora_dropout', type=float, default=0.05)
     parser.add_argument('--lambda_seg', type=float, default=1.0)
     parser.add_argument('--lambda_txt', type=float, default=0.5)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Batch size per GPU (total batch size = batch_size * num_gpus)')
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--num_epochs', type=int, default=20)
     parser.add_argument('--image_size', type=int, default=1024)
@@ -58,6 +62,13 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--deterministic', action='store_true', 
                        help='Enable fully deterministic training (may be slower)')
+    # Distributed training arguments
+    parser.add_argument('--local_rank', type=int, default=-1,
+                       help='Local rank for distributed training (set automatically by torchrun)')
+    parser.add_argument('--world_size', type=int, default=-1,
+                       help='Number of GPUs (set automatically by torchrun)')
+    parser.add_argument('--dist_url', type=str, default='env://',
+                       help='URL used to set up distributed training')
     return parser.parse_args()
 
 class PRSMedModel(nn.Module):
@@ -144,6 +155,50 @@ class PRSMedModel(nn.Module):
             "pred_ids": pred_ids,    # Predicted token IDs
         }
 
+def init_distributed(args):
+    """
+    Initialize distributed training environment.
+    Returns True if distributed training is enabled, False otherwise.
+    """
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        # Using torchrun or similar
+        args.rank = int(os.environ['RANK'])
+        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.local_rank = int(os.environ['LOCAL_RANK'])
+    elif args.local_rank != -1:
+        # Using torch.distributed.launch
+        args.rank = int(os.environ.get('RANK', args.local_rank))
+        args.world_size = int(os.environ.get('WORLD_SIZE', 1))
+        args.local_rank = args.local_rank
+    else:
+        # Single GPU or CPU
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = -1
+        return False
+    
+    # Initialize the process group
+    dist.init_process_group(
+        backend='nccl' if torch.cuda.is_available() else 'gloo',
+        init_method=args.dist_url,
+        world_size=args.world_size,
+        rank=args.rank
+    )
+    
+    # Set the device for this process
+    torch.cuda.set_device(args.local_rank)
+    
+    return True
+
+def cleanup_distributed():
+    """Clean up distributed training environment"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+def is_main_process():
+    """Check if this is the main process (rank 0)"""
+    return not dist.is_initialized() or dist.get_rank() == 0
+
 def prepare_text_targets(answers, tokenizer, max_length=512):
     """
     Properly tokenize answers for text generation loss
@@ -162,11 +217,23 @@ def prepare_text_targets(answers, tokenizer, max_length=512):
 def main():
     args = parse_args()
     
-    # Set random seed for reproducibility (must be done before any other operations)
-    set_seed(args.seed)
+    # Initialize distributed training
+    is_distributed = init_distributed(args)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Set device based on distributed setup
+    if is_distributed:
+        device = torch.device(f'cuda:{args.local_rank}')
+        if is_main_process():
+            print(f"Initialized distributed training with {args.world_size} GPUs")
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    if is_main_process():
+        print(f"Using device: {device}")
+    
+    # Set random seed for reproducibility (must be done before any other operations)
+    # Add rank to seed to ensure different random states across processes
+    set_seed(args.seed + (args.rank if is_distributed else 0))
 
     # Set default tensor type to float32
     torch.set_default_dtype(torch.float32)
@@ -174,29 +241,81 @@ def main():
     # Enable deterministic algorithms if requested
     if args.deterministic:
         torch.use_deterministic_algorithms(True, warn_only=True)
-        print("✓ Deterministic algorithms enabled")
+        if is_main_process():
+            print("✓ Deterministic algorithms enabled")
     
-    # Create checkpoint directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Create checkpoint directory (only on main process)
+    if is_main_process():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    else:
+        checkpoint_dir = None
     
     # Initialize data loaders
-    print(f"Loading data from {args.data_root}...")
-    data_loader = PRSMedDataLoader(
+    if is_main_process():
+        print(f"Loading data from {args.data_root}...")
+    
+    # Create datasets
+    from data.dataset import PRSMedDataset
+    train_dataset = PRSMedDataset(split='train', data_root=args.data_root)
+    val_dataset = PRSMedDataset(split='val', data_root=args.data_root)
+    
+    # Create distributed samplers if using distributed training
+    if is_distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=True,
+            seed=args.seed
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False
+        )
+        shuffle = False  # Shuffle is handled by DistributedSampler
+    else:
+        train_sampler = None
+        val_sampler = None
+        shuffle = True
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
+        shuffle=shuffle,
+        sampler=train_sampler,
         num_workers=args.num_workers,
-        data_root=args.data_root
+        pin_memory=True,
+        drop_last=True  # Drop last incomplete batch for distributed training
     )
     
-    train_loader = data_loader.get_dataloader('train', shuffle=True)
-    val_loader = data_loader.get_dataloader('val', shuffle=False)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
     
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
+    if is_main_process():
+        print(f"Training samples: {len(train_dataset)}")
+        print(f"Validation samples: {len(val_dataset)}")
+        print(f"Effective batch size: {args.batch_size * args.world_size if is_distributed else args.batch_size}")
     
     # Initialize complete PRS-Med model
     model = PRSMedModel(args, device)
+    
+    # Wrap model with DDP if using distributed training
+    if is_distributed:
+        model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+        model_for_saving = model.module  # Access underlying model for saving
+    else:
+        model_for_saving = model
     
     # Setup optimizer and loss
     trainable_params = []
@@ -205,9 +324,11 @@ def main():
             trainable_params.append(param)
     
     # Use AdamW optimizer with weight decay (from paper)
+    # Scale learning rate by world size for distributed training
+    effective_lr = args.learning_rate * (args.world_size if is_distributed else 1)
     optimizer = optim.AdamW(
         trainable_params, 
-        lr=args.learning_rate,
+        lr=effective_lr,
         weight_decay=0.01,  # From paper hyperparameters
         betas=(0.9, 0.999)
     )
@@ -216,8 +337,14 @@ def main():
     # Training parameters
     best_val_loss = float('inf')
     
-    print("Starting training...")
+    if is_main_process():
+        print("Starting training...")
+        print(f"Learning rate: {effective_lr} (base: {args.learning_rate}, scaled by world_size: {args.world_size if is_distributed else 1})")
+    
     for epoch in range(args.num_epochs):
+        # Set epoch for DistributedSampler to ensure proper shuffling
+        if is_distributed:
+            train_sampler.set_epoch(epoch)
         # Training phase
         model.train()
         epoch_loss_total = 0.0
@@ -240,8 +367,9 @@ def main():
             pred_masks = outputs["z_mask"]
             text_logits = outputs["z_txt_logits"]
             
-            # Prepare text targets
-            text_targets = prepare_text_targets(answers, model.mllm.processor.tokenizer)
+            # Prepare text targets - access tokenizer from the underlying model
+            tokenizer = model_for_saving.mllm.processor.tokenizer
+            text_targets = prepare_text_targets(answers, tokenizer)
             text_targets = text_targets.to(device)
             
             # Calculate loss
@@ -264,7 +392,7 @@ def main():
             epoch_loss_seg += loss_dict["loss_seg"].item()
             epoch_loss_txt += loss_dict["loss_txt"].item()
             
-            if batch_idx % 10 == 0:
+            if is_main_process() and batch_idx % 10 == 0:
                 print(f'Epoch {epoch+1}, Batch {batch_idx}, '
                       f'Total Loss: {loss_total.item():.4f}, '
                       f'Seg Loss: {loss_dict["loss_seg"].item():.4f}, '
@@ -276,11 +404,12 @@ def main():
         avg_train_loss_txt = epoch_loss_txt / len(train_loader)
         epoch_time = time.time() - epoch_start_time
         
-        print(f'Epoch {epoch+1} - TRAIN - '
-              f'Total Loss: {avg_train_loss_total:.4f}, '
-              f'Seg Loss: {avg_train_loss_seg:.4f}, '
-              f'Text Loss: {avg_train_loss_txt:.4f}, '
-              f'Time: {epoch_time:.2f}s')
+        if is_main_process():
+            print(f'Epoch {epoch+1} - TRAIN - '
+                  f'Total Loss: {avg_train_loss_total:.4f}, '
+                  f'Seg Loss: {avg_train_loss_seg:.4f}, '
+                  f'Text Loss: {avg_train_loss_txt:.4f}, '
+                  f'Time: {epoch_time:.2f}s')
         
         # Validation phase
         model.eval()
@@ -299,7 +428,9 @@ def main():
                 pred_masks = outputs["z_mask"]
                 text_logits = outputs["z_txt_logits"]
                 
-                text_targets = prepare_text_targets(answers, model.mllm.processor.tokenizer)
+                # Access tokenizer from the underlying model
+                tokenizer = model_for_saving.mllm.processor.tokenizer
+                text_targets = prepare_text_targets(answers, tokenizer)
                 text_targets = text_targets.to(device)
                 
                 loss_dict = criterion(
@@ -313,30 +444,52 @@ def main():
                 val_loss_seg += loss_dict["loss_seg"].item()
                 val_loss_txt += loss_dict["loss_txt"].item()
         
-        # Calculate validation averages
-        avg_val_loss_total = val_loss_total / len(val_loader)
-        avg_val_loss_seg = val_loss_seg / len(val_loader)
-        avg_val_loss_txt = val_loss_txt / len(val_loader)
+        # Aggregate validation losses across all GPUs
+        if is_distributed:
+            # Create tensors for aggregation
+            val_loss_tensor = torch.tensor([val_loss_total, val_loss_seg, val_loss_txt], device=device)
+            dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+            val_loss_total = val_loss_tensor[0].item()
+            val_loss_seg = val_loss_tensor[1].item()
+            val_loss_txt = val_loss_tensor[2].item()
+            
+            # Get total number of validation batches across all processes
+            num_val_batches = torch.tensor(len(val_loader), device=device)
+            dist.all_reduce(num_val_batches, op=dist.ReduceOp.SUM)
+            total_val_batches = num_val_batches.item()
+        else:
+            total_val_batches = len(val_loader)
         
-        print(f'Epoch {epoch+1} - VALIDATION - '
-              f'Total Loss: {avg_val_loss_total:.4f}, '
-              f'Seg Loss: {avg_val_loss_seg:.4f}, '
-              f'Text Loss: {avg_val_loss_txt:.4f}')
+        # Calculate validation averages (across all GPUs if distributed)
+        avg_val_loss_total = val_loss_total / total_val_batches
+        avg_val_loss_seg = val_loss_seg / total_val_batches
+        avg_val_loss_txt = val_loss_txt / total_val_batches
         
-        # Save checkpoints
-        if avg_val_loss_total < best_val_loss:
-            best_val_loss = avg_val_loss_total
-            save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=True)
-            print(f"New best model saved with val_loss: {avg_val_loss_total:.4f}")
+        if is_main_process():
+            print(f'Epoch {epoch+1} - VALIDATION - '
+                  f'Total Loss: {avg_val_loss_total:.4f}, '
+                  f'Seg Loss: {avg_val_loss_seg:.4f}, '
+                  f'Text Loss: {avg_val_loss_txt:.4f}')
         
-        # Save periodic checkpoints
-        if (epoch + 1) % 5 == 0:
-            save_checkpoint(epoch, model, optimizer, checkpoint_dir)
-            print(f"Checkpoint saved at epoch {epoch+1}")
+        # Save checkpoints (only on main process)
+        if is_main_process():
+            if avg_val_loss_total < best_val_loss:
+                best_val_loss = avg_val_loss_total
+                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir, is_best=True)
+                print(f"New best model saved with val_loss: {avg_val_loss_total:.4f}")
+            
+            # Save periodic checkpoints
+            if (epoch + 1) % 5 == 0:
+                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
+                print(f"Checkpoint saved at epoch {epoch+1}")
     
-    print("Training completed!")
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Final checkpoints saved in: {checkpoint_dir}")
+    if is_main_process():
+        print("Training completed!")
+        print(f"Best validation loss: {best_val_loss:.4f}")
+        print(f"Final checkpoints saved in: {checkpoint_dir}")
+    
+    # Clean up distributed training
+    cleanup_distributed()
 
 def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False):
     """Save complete model checkpoint"""
