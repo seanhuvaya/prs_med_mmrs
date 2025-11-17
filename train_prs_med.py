@@ -6,6 +6,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import time
 from datetime import datetime
+import random
+import numpy as np
 
 # Import all components including vision backbone
 from data.dataset import PRSMedDataLoader
@@ -14,6 +16,28 @@ from models.mllm.llava_med_lora_adapter import LLavaMedWithLoRA
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
 from models.loss.objective_function import PRSMedLoss
+
+def set_seed(seed: int = 42):
+    """
+    Set random seeds for reproducibility.
+    
+    Args:
+        seed: Random seed value (default: 42)
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # Enable deterministic algorithms (may reduce performance)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Set Python hash seed for reproducibility
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    print(f"✓ Random seed set to {seed} for reproducibility")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PRS-Med Training')
@@ -31,6 +55,9 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=20)
     parser.add_argument('--image_size', type=int, default=1024)
     parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--deterministic', action='store_true', 
+                       help='Enable fully deterministic training (may be slower)')
     return parser.parse_args()
 
 class PRSMedModel(nn.Module):
@@ -134,11 +161,20 @@ def prepare_text_targets(answers, tokenizer, max_length=512):
 
 def main():
     args = parse_args()
+    
+    # Set random seed for reproducibility (must be done before any other operations)
+    set_seed(args.seed)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     # Set default tensor type to float32
     torch.set_default_dtype(torch.float32)
+    
+    # Enable deterministic algorithms if requested
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        print("✓ Deterministic algorithms enabled")
     
     # Create checkpoint directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -168,7 +204,13 @@ def main():
         if param.requires_grad:
             trainable_params.append(param)
     
-    optimizer = optim.AdamW(trainable_params, lr=args.learning_rate)
+    # Use AdamW optimizer with weight decay (from paper)
+    optimizer = optim.AdamW(
+        trainable_params, 
+        lr=args.learning_rate,
+        weight_decay=0.01,  # From paper hyperparameters
+        betas=(0.9, 0.999)
+    )
     criterion = PRSMedLoss(lambda_seg=args.lambda_seg, lambda_txt=args.lambda_txt)
     
     # Training parameters
