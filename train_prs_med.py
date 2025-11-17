@@ -322,6 +322,9 @@ def prepare_text_targets(answers, tokenizer, max_length=512):
 def main():
     args = parse_args()
     
+    # Set tokenizers parallelism to avoid warnings when forking
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    
     # Print environment info for debugging (only on main process after init)
     if 'RANK' in os.environ or 'LOCAL_RANK' in os.environ:
         print(f"Distributed environment detected:")
@@ -362,6 +365,9 @@ def main():
         if is_main_process():
             print("✓ Deterministic algorithms enabled")
     
+    # Initialize checkpoint_dir variable (needed for scope)
+    checkpoint_dir = None
+    
     # Create checkpoint directory (only on main process)
     if is_main_process():
         # Ensure base checkpoint directory exists
@@ -389,8 +395,6 @@ def main():
             print(f"  Write test: SUCCESS")
         except Exception as e:
             print(f"  Write test: FAILED - {e}")
-    else:
-        checkpoint_dir = None
     
     # Initialize data loaders
     if is_main_process():
@@ -791,32 +795,46 @@ def main():
                   f'Text Loss: {avg_val_loss_txt:.4f}')
         
         # Save checkpoints (only on main process)
-        if is_main_process():
-            if checkpoint_dir is None:
-                print("WARNING: checkpoint_dir is None, creating default checkpoint directory")
-                checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        if is_main_process() and checkpoint_dir is not None:
+            # Ensure checkpoint_dir still exists
+            if not os.path.exists(checkpoint_dir):
+                print(f"WARNING: Checkpoint directory missing, recreating: {checkpoint_dir}")
                 os.makedirs(checkpoint_dir, exist_ok=True)
             
+            # Save best model if validation improved
             if avg_val_loss_total < best_val_loss:
                 best_val_loss = avg_val_loss_total
-                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir, is_best=True)
-                print(f"New best model saved with val_loss: {avg_val_loss_total:.4f}")
+                success = save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir, is_best=True)
+                if success:
+                    print(f"✓ New best model saved with val_loss: {avg_val_loss_total:.4f}")
+                else:
+                    print(f"✗ Failed to save best model!")
             
             # Save periodic checkpoints every 5 epochs
             if (epoch + 1) % 5 == 0:
-                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
-                print(f"Periodic checkpoint saved at epoch {epoch+1}")
+                success = save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
+                if success:
+                    print(f"✓ Periodic checkpoint saved at epoch {epoch+1}")
+                else:
+                    print(f"✗ Failed to save periodic checkpoint!")
             
             # Save checkpoint at end of epoch 1 (for debugging/verification)
             if epoch == 0:
-                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
-                print(f"Initial checkpoint saved at epoch {epoch+1}")
+                success = save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
+                if success:
+                    print(f"✓ Initial checkpoint saved at epoch {epoch+1}")
+                else:
+                    print(f"✗ Failed to save initial checkpoint!")
+        elif is_main_process() and checkpoint_dir is None:
+            print("ERROR: Cannot save checkpoint - checkpoint_dir is None!")
     
     if is_main_process():
         # Save final checkpoint
         if checkpoint_dir is not None:
             print("Saving final checkpoint...")
-            save_checkpoint(args.num_epochs - 1, model_for_saving, optimizer, checkpoint_dir)
+            success = save_checkpoint(args.num_epochs - 1, model_for_saving, optimizer, checkpoint_dir)
+            if not success:
+                print("WARNING: Failed to save final checkpoint!")
         
         print("Training completed!")
         print(f"Best validation loss: {best_val_loss:.4f}")
@@ -839,41 +857,158 @@ def main():
     # Clean up distributed training
     cleanup_distributed()
 
-def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False):
-    """Save complete model checkpoint"""
-    if checkpoint_dir is None:
-        print("WARNING: checkpoint_dir is None, cannot save checkpoint")
-        return
-    
+def check_disk_space(path, required_gb=5.0):
+    """Check if there's enough disk space available"""
     try:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
+        import shutil
+        stat = shutil.disk_usage(path)
+        free_gb = stat.free / (1024 ** 3)  # Convert to GB
+        if free_gb < required_gb:
+            print(f"WARNING: Low disk space: {free_gb:.2f} GB free (need at least {required_gb} GB)")
+            return False
+        return True
+    except Exception as e:
+        print(f"WARNING: Could not check disk space: {e}")
+        return True  # Assume OK if we can't check
+
+def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False, max_retries=3):
+    """Save complete model checkpoint with atomic writes and retry logic"""
+    if checkpoint_dir is None:
+        print("ERROR: checkpoint_dir is None, cannot save checkpoint")
+        return False
+    
+    if not os.path.exists(checkpoint_dir):
+        print(f"ERROR: Checkpoint directory does not exist: {checkpoint_dir}")
+        try:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            print(f"Created checkpoint directory: {checkpoint_dir}")
+        except Exception as e:
+            print(f"ERROR: Failed to create checkpoint directory: {e}")
+            return False
+    
+    # Check disk space before attempting to save
+    if not check_disk_space(checkpoint_dir, required_gb=10.0):
+        print("ERROR: Insufficient disk space to save checkpoint")
+        return False
+    
+    # Unwrap DDP model if needed
+    if hasattr(model, 'module'):
+        model_to_save = model.module
+    else:
+        model_to_save = model
+    
+    if is_best:
+        filename = f'best_model_epoch_{epoch+1}.pth'
+    else:
+        filename = f'checkpoint_epoch_{epoch+1}.pth'
+    
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
+    temp_path = checkpoint_path + '.tmp'
+    
+    # Prepare checkpoint data
+    try:
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'timestamp': datetime.now().isoformat()
         }
-        
-        if is_best:
-            filename = f'best_model_epoch_{epoch+1}.pth'
-        else:
-            filename = f'checkpoint_epoch_{epoch+1}.pth'
-        
-        checkpoint_path = os.path.join(checkpoint_dir, filename)
-        torch.save(checkpoint, checkpoint_path)
-        print(f"✓ Checkpoint saved to {checkpoint_path}")
-        
-        # Verify file was actually written
-        if os.path.exists(checkpoint_path):
-            file_size = os.path.getsize(checkpoint_path) / (1024 * 1024)  # Size in MB
-            print(f"  File size: {file_size:.2f} MB")
-        else:
-            print(f"ERROR: Checkpoint file was not created at {checkpoint_path}")
     except Exception as e:
-        print(f"ERROR: Failed to save checkpoint: {e}")
+        print(f"ERROR: Failed to prepare checkpoint data: {e}")
         import traceback
         traceback.print_exc()
+        return False
+    
+    # Try saving with retries
+    for attempt in range(max_retries):
+        try:
+            # Remove temp file if it exists from previous failed attempt
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            
+            # Save to temporary file first (atomic write)
+            print(f"  Saving checkpoint (attempt {attempt + 1}/{max_retries})...")
+            torch.save(checkpoint, temp_path)
+            
+            # Flush filesystem buffers
+            import sys
+            sys.stdout.flush()
+            if hasattr(os, 'sync'):
+                try:
+                    os.sync()
+                except:
+                    pass
+            
+            # Verify temp file was written correctly
+            if not os.path.exists(temp_path):
+                raise RuntimeError(f"Temporary checkpoint file was not created: {temp_path}")
+            
+            temp_size = os.path.getsize(temp_path)
+            if temp_size == 0:
+                raise RuntimeError(f"Temporary checkpoint file is empty: {temp_path}")
+            
+            # Atomically rename temp file to final location
+            # This ensures the checkpoint is either fully written or not present at all
+            os.rename(temp_path, checkpoint_path)
+            
+            # Verify final file exists and has correct size
+            if not os.path.exists(checkpoint_path):
+                raise RuntimeError(f"Checkpoint file was not created after rename: {checkpoint_path}")
+            
+            final_size = os.path.getsize(checkpoint_path)
+            if final_size != temp_size:
+                raise RuntimeError(f"File size mismatch after rename: {final_size} != {temp_size}")
+            
+            # Success!
+            file_size_mb = final_size / (1024 * 1024)  # Size in MB
+            print(f"✓ Checkpoint saved to {checkpoint_path}")
+            print(f"  File size: {file_size_mb:.2f} MB")
+            return True
+            
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "file write failed" in error_msg.lower() or "unexpected pos" in error_msg.lower():
+                print(f"  Attempt {attempt + 1} failed: File write error - {error_msg}")
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in 2 seconds...")
+                    import time
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"ERROR: Failed to save checkpoint after {max_retries} attempts")
+                    print(f"  This might be due to:")
+                    print(f"    - Insufficient disk space")
+                    print(f"    - File system issues")
+                    print(f"    - Network file system problems (if using network mount)")
+                    print(f"    - Disk I/O errors")
+                    return False
+            else:
+                raise  # Re-raise if it's a different error
+                
+        except Exception as e:
+            print(f"ERROR: Failed to save checkpoint on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                print(f"  Retrying in 2 seconds...")
+                import time
+                time.sleep(2)
+                continue
+            else:
+                print(f"ERROR: Failed to save checkpoint after {max_retries} attempts")
+                import traceback
+                traceback.print_exc()
+                return False
+    
+    # Clean up temp file if it still exists
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except:
+            pass
+    
+    return False
 
 
 def debug_full_pipeline(model, train_loader, device):
