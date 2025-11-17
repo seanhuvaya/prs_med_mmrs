@@ -50,8 +50,10 @@ uv run python -m torch.distributed.run \
     --learning_rate 1e-4 \
     --num_epochs 20 \
     --checkpoint_dir ./checkpoints \
-    --num_workers 4 \
-    --seed 42
+    --num_workers 8 \
+    --seed 42 \
+    --use_amp \
+    --compile_model
 
 echo ""
 echo "Training completed!"

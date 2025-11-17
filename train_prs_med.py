@@ -71,6 +71,19 @@ def parse_args():
                        help='Number of GPUs (set automatically by torchrun)')
     parser.add_argument('--dist_url', type=str, default='env://',
                        help='URL used to set up distributed training')
+    # Memory optimization arguments
+    parser.add_argument('--use_amp', action='store_true', default=False,
+                       help='Use Automatic Mixed Precision (AMP) to reduce memory usage')
+    parser.add_argument('--no-use_amp', dest='use_amp', action='store_false',
+                       help='Disable Automatic Mixed Precision (AMP)')
+    # Set default to True if neither flag is specified
+    parser.set_defaults(use_amp=True)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                       help='Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)')
+    parser.add_argument('--gradient_checkpointing', action='store_true', default=False,
+                       help='Use gradient checkpointing to trade compute for memory')
+    parser.add_argument('--compile_model', action='store_true', default=False,
+                       help='Compile model with torch.compile for better memory efficiency (PyTorch 2.0+)')
     return parser.parse_args()
 
 class PRSMedModel(nn.Module):
@@ -351,9 +364,31 @@ def main():
     
     # Create checkpoint directory (only on main process)
     if is_main_process():
+        # Ensure base checkpoint directory exists
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{timestamp}')
         os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        print(f"✓ Checkpoint directory created: {checkpoint_dir}")
+        print(f"  Absolute path: {os.path.abspath(checkpoint_dir)}")
+        
+        # Verify directory exists and is writable
+        if os.path.exists(checkpoint_dir) and os.access(checkpoint_dir, os.W_OK):
+            print(f"  Directory is writable")
+        else:
+            print(f"  WARNING: Directory may not be writable!")
+            
+        # Test write permissions by creating a test file
+        try:
+            test_file = os.path.join(checkpoint_dir, '.test_write')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print(f"  Write test: SUCCESS")
+        except Exception as e:
+            print(f"  Write test: FAILED - {e}")
     else:
         checkpoint_dir = None
     
@@ -480,6 +515,39 @@ def main():
     else:
         model_for_saving = model
     
+    # Enable gradient checkpointing if requested
+    if args.gradient_checkpointing:
+        if hasattr(model, 'module'):  # DDP wrapped
+            # Enable checkpointing for vision backbone
+            if hasattr(model.module.vision_backbone.encoder, 'use_checkpoint'):
+                # Set use_checkpoint for all layers in TinySAM encoder
+                for module in model.module.vision_backbone.encoder.modules():
+                    if hasattr(module, 'use_checkpoint'):
+                        module.use_checkpoint = True
+            # Enable checkpointing for MLLM
+            if hasattr(model.module.mllm.model, 'gradient_checkpointing_enable'):
+                model.module.mllm.model.gradient_checkpointing_enable()
+        else:
+            # Enable checkpointing for vision backbone
+            if hasattr(model.vision_backbone.encoder, 'use_checkpoint'):
+                # Set use_checkpoint for all layers in TinySAM encoder
+                for module in model.vision_backbone.encoder.modules():
+                    if hasattr(module, 'use_checkpoint'):
+                        module.use_checkpoint = True
+            # Enable checkpointing for MLLM
+            if hasattr(model.mllm.model, 'gradient_checkpointing_enable'):
+                model.mllm.model.gradient_checkpointing_enable()
+        if is_main_process():
+            print("✓ Gradient checkpointing enabled")
+    
+    # Compile model if requested (PyTorch 2.0+)
+    if args.compile_model and hasattr(torch, 'compile'):
+        if is_main_process():
+            print("Compiling model with torch.compile...")
+        model = torch.compile(model, mode='reduce-overhead')
+        if is_main_process():
+            print("✓ Model compiled")
+    
     # Setup optimizer and loss
     trainable_params = []
     for name, param in model.named_parameters():
@@ -497,12 +565,23 @@ def main():
     )
     criterion = PRSMedLoss(lambda_seg=args.lambda_seg, lambda_txt=args.lambda_txt)
     
+    # Setup mixed precision training (AMP)
+    scaler = None
+    if args.use_amp and torch.cuda.is_available():
+        scaler = torch.cuda.amp.GradScaler()
+        if is_main_process():
+            print("✓ Mixed precision training (AMP) enabled")
+    
     # Training parameters
     best_val_loss = float('inf')
     
     if is_main_process():
         print("Starting training...")
         print(f"Learning rate: {effective_lr} (base: {args.learning_rate}, scaled by world_size: {args.world_size if is_distributed else 1})")
+        print(f"Gradient accumulation steps: {args.gradient_accumulation_steps}")
+        print(f"Effective batch size per GPU: {args.batch_size * args.gradient_accumulation_steps}")
+        if is_distributed:
+            print(f"Total effective batch size: {args.batch_size * args.gradient_accumulation_steps * args.world_size}")
     
     for epoch in range(args.num_epochs):
         # Set epoch for DistributedSampler to ensure proper shuffling
@@ -515,51 +594,109 @@ def main():
         epoch_loss_txt = 0.0
         epoch_start_time = time.time()
         
+        # Initialize gradients at the start of epoch
+        optimizer.zero_grad()
+        
         for batch_idx, batch in enumerate(train_loader):
             # Move data to device
-            images = batch['image'].to(device)
-            masks = batch['mask'].to(device)
+            images = batch['image'].to(device, non_blocking=True)
+            masks = batch['mask'].to(device, non_blocking=True)
             questions = batch['question']
             answers = batch['answer']
             
-            # Zero gradients
-            optimizer.zero_grad()
+            # Forward pass with mixed precision
+            if scaler is not None:
+                # Mixed precision forward pass
+                with torch.cuda.amp.autocast():
+                    outputs = model(images, questions)
+                    pred_masks = outputs["z_mask"]
+                    text_logits = outputs["z_txt_logits"]
+                    
+                    # Prepare text targets - access tokenizer from the underlying model
+                    tokenizer = model_for_saving.mllm.processor.tokenizer
+                    text_targets = prepare_text_targets(answers, tokenizer)
+                    text_targets = text_targets.to(device)
+                    
+                    # Calculate loss
+                    loss_dict = criterion(
+                        z_mask=pred_masks,
+                        y_mask=masks,
+                        z_txt=text_logits,  # Use text logits, not embeddings
+                        y_txt=text_targets
+                    )
+                    
+                    loss_total = loss_dict["loss_total"]
+                    # Scale loss for gradient accumulation
+                    loss_total = loss_total / args.gradient_accumulation_steps
+                
+                # Backward pass with gradient scaling
+                scaler.scale(loss_total).backward()
+            else:
+                # Standard precision forward pass
+                outputs = model(images, questions)
+                pred_masks = outputs["z_mask"]
+                text_logits = outputs["z_txt_logits"]
+                
+                # Prepare text targets - access tokenizer from the underlying model
+                tokenizer = model_for_saving.mllm.processor.tokenizer
+                text_targets = prepare_text_targets(answers, tokenizer)
+                text_targets = text_targets.to(device)
+                
+                # Calculate loss
+                loss_dict = criterion(
+                    z_mask=pred_masks,
+                    y_mask=masks,
+                    z_txt=text_logits,  # Use text logits, not embeddings
+                    y_txt=text_targets
+                )
+                
+                loss_total = loss_dict["loss_total"]
+                # Scale loss for gradient accumulation
+                loss_total = loss_total / args.gradient_accumulation_steps
+                
+                # Backward pass
+                loss_total.backward()
             
-            # Forward pass
-            outputs = model(images, questions)
-            pred_masks = outputs["z_mask"]
-            text_logits = outputs["z_txt_logits"]
+            # Gradient accumulation: only update weights every N steps
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                if scaler is not None:
+                    # Unscale gradients before clipping
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    optimizer.step()
+                
+                optimizer.zero_grad()
             
-            # Prepare text targets - access tokenizer from the underlying model
-            tokenizer = model_for_saving.mllm.processor.tokenizer
-            text_targets = prepare_text_targets(answers, tokenizer)
-            text_targets = text_targets.to(device)
-            
-            # Calculate loss
-            loss_dict = criterion(
-                z_mask=pred_masks,
-                y_mask=masks,
-                z_txt=text_logits,  # Use text logits, not embeddings
-                y_txt=text_targets
-            )
-            
-            loss_total = loss_dict["loss_total"]
-            
-            # Backward pass
-            loss_total.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
-            optimizer.step()
-            
-            # Accumulate losses
-            epoch_loss_total += loss_total.item()
-            epoch_loss_seg += loss_dict["loss_seg"].item()
-            epoch_loss_txt += loss_dict["loss_txt"].item()
+            # Accumulate losses (multiply by accumulation steps to get true loss)
+            epoch_loss_total += loss_total.item() * args.gradient_accumulation_steps
+            epoch_loss_seg += loss_dict["loss_seg"].item() * args.gradient_accumulation_steps
+            epoch_loss_txt += loss_dict["loss_txt"].item() * args.gradient_accumulation_steps
             
             if is_main_process() and batch_idx % 10 == 0:
+                # Clear cache periodically to free memory
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
                 print(f'Epoch {epoch+1}, Batch {batch_idx}, '
-                      f'Total Loss: {loss_total.item():.4f}, '
+                      f'Total Loss: {loss_total.item() * args.gradient_accumulation_steps:.4f}, '
                       f'Seg Loss: {loss_dict["loss_seg"].item():.4f}, '
                       f'Text Loss: {loss_dict["loss_txt"].item():.4f}')
+        
+        # Handle remaining gradients if batch doesn't divide evenly
+        if len(train_loader) % args.gradient_accumulation_steps != 0:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                optimizer.step()
+            optimizer.zero_grad()
         
         # Calculate epoch averages
         avg_train_loss_total = epoch_loss_total / len(train_loader)
@@ -582,26 +719,45 @@ def main():
         
         with torch.no_grad():
             for batch in val_loader:
-                images = batch['image'].to(device)
-                masks = batch['mask'].to(device)
+                images = batch['image'].to(device, non_blocking=True)
+                masks = batch['mask'].to(device, non_blocking=True)
                 questions = batch['question']
                 answers = batch['answer']
                 
-                outputs = model(images, questions)
-                pred_masks = outputs["z_mask"]
-                text_logits = outputs["z_txt_logits"]
-                
-                # Access tokenizer from the underlying model
-                tokenizer = model_for_saving.mllm.processor.tokenizer
-                text_targets = prepare_text_targets(answers, tokenizer)
-                text_targets = text_targets.to(device)
-                
-                loss_dict = criterion(
-                    z_mask=pred_masks,
-                    y_mask=masks,
-                    z_txt=text_logits,
-                    y_txt=text_targets
-                )
+                # Use mixed precision for validation if enabled
+                if scaler is not None:
+                    with torch.cuda.amp.autocast():
+                        outputs = model(images, questions)
+                        pred_masks = outputs["z_mask"]
+                        text_logits = outputs["z_txt_logits"]
+                        
+                        # Access tokenizer from the underlying model
+                        tokenizer = model_for_saving.mllm.processor.tokenizer
+                        text_targets = prepare_text_targets(answers, tokenizer)
+                        text_targets = text_targets.to(device)
+                        
+                        loss_dict = criterion(
+                            z_mask=pred_masks,
+                            y_mask=masks,
+                            z_txt=text_logits,
+                            y_txt=text_targets
+                        )
+                else:
+                    outputs = model(images, questions)
+                    pred_masks = outputs["z_mask"]
+                    text_logits = outputs["z_txt_logits"]
+                    
+                    # Access tokenizer from the underlying model
+                    tokenizer = model_for_saving.mllm.processor.tokenizer
+                    text_targets = prepare_text_targets(answers, tokenizer)
+                    text_targets = text_targets.to(device)
+                    
+                    loss_dict = criterion(
+                        z_mask=pred_masks,
+                        y_mask=masks,
+                        z_txt=text_logits,
+                        y_txt=text_targets
+                    )
                 
                 val_loss_total += loss_dict["loss_total"].item()
                 val_loss_seg += loss_dict["loss_seg"].item()
@@ -636,43 +792,88 @@ def main():
         
         # Save checkpoints (only on main process)
         if is_main_process():
+            if checkpoint_dir is None:
+                print("WARNING: checkpoint_dir is None, creating default checkpoint directory")
+                checkpoint_dir = os.path.join(args.checkpoint_dir, f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+                os.makedirs(checkpoint_dir, exist_ok=True)
+            
             if avg_val_loss_total < best_val_loss:
                 best_val_loss = avg_val_loss_total
                 save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir, is_best=True)
                 print(f"New best model saved with val_loss: {avg_val_loss_total:.4f}")
             
-            # Save periodic checkpoints
+            # Save periodic checkpoints every 5 epochs
             if (epoch + 1) % 5 == 0:
                 save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
-                print(f"Checkpoint saved at epoch {epoch+1}")
+                print(f"Periodic checkpoint saved at epoch {epoch+1}")
+            
+            # Save checkpoint at end of epoch 1 (for debugging/verification)
+            if epoch == 0:
+                save_checkpoint(epoch, model_for_saving, optimizer, checkpoint_dir)
+                print(f"Initial checkpoint saved at epoch {epoch+1}")
     
     if is_main_process():
+        # Save final checkpoint
+        if checkpoint_dir is not None:
+            print("Saving final checkpoint...")
+            save_checkpoint(args.num_epochs - 1, model_for_saving, optimizer, checkpoint_dir)
+        
         print("Training completed!")
         print(f"Best validation loss: {best_val_loss:.4f}")
-        print(f"Final checkpoints saved in: {checkpoint_dir}")
+        if checkpoint_dir is not None:
+            print(f"Final checkpoints saved in: {checkpoint_dir}")
+            # List all checkpoint files
+            if os.path.exists(checkpoint_dir):
+                checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pth')]
+                if checkpoint_files:
+                    print(f"Saved {len(checkpoint_files)} checkpoint(s):")
+                    for f in sorted(checkpoint_files):
+                        file_path = os.path.join(checkpoint_dir, f)
+                        file_size = os.path.getsize(file_path) / (1024 * 1024)
+                        print(f"  - {f} ({file_size:.2f} MB)")
+                else:
+                    print("WARNING: No checkpoint files found in directory!")
+        else:
+            print("WARNING: checkpoint_dir was None, no checkpoints were saved!")
     
     # Clean up distributed training
     cleanup_distributed()
 
 def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False):
     """Save complete model checkpoint"""
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if checkpoint_dir is None:
+        print("WARNING: checkpoint_dir is None, cannot save checkpoint")
+        return
     
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    if is_best:
-        filename = f'best_model_epoch_{epoch+1}.pth'
-    else:
-        filename = f'checkpoint_epoch_{epoch+1}.pth'
-    
-    checkpoint_path = os.path.join(checkpoint_dir, filename)
-    torch.save(checkpoint, checkpoint_path)
-    print(f"Checkpoint saved to {checkpoint_path}")
+    try:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        if is_best:
+            filename = f'best_model_epoch_{epoch+1}.pth'
+        else:
+            filename = f'checkpoint_epoch_{epoch+1}.pth'
+        
+        checkpoint_path = os.path.join(checkpoint_dir, filename)
+        torch.save(checkpoint, checkpoint_path)
+        print(f"✓ Checkpoint saved to {checkpoint_path}")
+        
+        # Verify file was actually written
+        if os.path.exists(checkpoint_path):
+            file_size = os.path.getsize(checkpoint_path) / (1024 * 1024)  # Size in MB
+            print(f"  File size: {file_size:.2f} MB")
+        else:
+            print(f"ERROR: Checkpoint file was not created at {checkpoint_path}")
+    except Exception as e:
+        print(f"ERROR: Failed to save checkpoint: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def debug_full_pipeline(model, train_loader, device):
