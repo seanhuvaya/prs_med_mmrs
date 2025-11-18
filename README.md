@@ -1,214 +1,401 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
 
-This is a complete implementation of the [PRS-Med paper](https://arxiv.org/pdf/2505.11872) for Position Reasoning Segmentation in Medical Imaging.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.9+-orange.svg)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## 🚀 **Quick Start**
+A complete PyTorch implementation of **PRS-Med** (Position Reasoning Segmentation with Vision-Language Model) for medical image segmentation. This implementation combines TinySAM vision encoder with LLaVA-Med multimodal language model to perform position-aware medical image segmentation.
 
-### 1. **Prepare Data**
+## 📋 Table of Contents
+
+- [Features](#-features)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Project Structure](#-project-structure)
+- [Training](#-training)
+- [Evaluation](#-evaluation)
+- [Model Architecture](#-model-architecture)
+- [Memory Optimization](#-memory-optimization)
+- [Multi-GPU Training](#-multi-gpu-training)
+- [Supported Modalities](#-supported-modalities)
+- [Configuration](#-configuration)
+- [Troubleshooting](#-troubleshooting)
+- [References](#-references)
+
+## ✨ Features
+
+- ✅ **Position Reasoning**: Understands spatial relationships in medical images
+- ✅ **Multi-modal**: Works across 7+ medical imaging modalities
+- ✅ **Efficient Training**: LoRA adaptation for efficient fine-tuning
+- ✅ **Memory Optimized**: Mixed precision training, gradient checkpointing, and accumulation
+- ✅ **Distributed Training**: Multi-GPU support with DDP
+- ✅ **Comprehensive Evaluation**: Dice, IoU, Hausdorff distance, and position accuracy metrics
+- ✅ **Production Ready**: Robust checkpoint saving with atomic writes and retry logic
+
+## 🚀 Installation
+
+### Prerequisites
+
+- Python 3.11+
+- CUDA-capable GPU (recommended) or CPU
+- [uv](https://github.com/astral-sh/uv) package manager
+
+### Install Dependencies
+
 ```bash
-# Organize raw data into MMRS format
-uv run python main.py prepare
+# Clone the repository
+git clone <repository-url>
+cd prs_med_mmrs
+
+# Install dependencies using uv
+uv sync
+
+# Or install manually
+pip install -r requirements.txt
 ```
 
-### 2. **Train Model**
+### Download Model Weights
+
+Download the TinySAM checkpoint and place it in the `weights/` directory:
+
 ```bash
-# Train on all modalities
-uv run python main.py train --epochs 50 --batch_size 8
-
-# Train on specific modalities only
-uv run python main.py train --modalities brain_tumors_ct_scan lung_CT --epochs 30
-
-# Fast test run
-uv run python main.py train --epochs 5 --batch_size 2
+mkdir -p weights
+# Download tinysam_42.3.pth to weights/tinysam_42.3.pth
 ```
 
-### 3. **Run Inference**
-```bash
-# Run inference on test data
-uv run python main.py infer --checkpoint outputs/final_model.pth
+## 🏃 Quick Start
+
+### 1. Prepare Your Data
+
+Organize your data in the MMRS format:
+
+```
+data/
+├── images_and_masks/
+│   ├── image_001.png
+│   ├── mask_001.png
+│   └── ...
+└── csv/
+    ├── train.csv
+    ├── val.csv
+    └── test.csv
 ```
 
-## 📁 **Project Structure**
+CSV format should include columns: `image_path`, `mask_path`, `question`, `answer`, `modality`
+
+### 2. Train the Model
+
+**Single GPU Training:**
+```bash
+python train_prs_med.py \
+    --data_root ./data \
+    --batch_size 8 \
+    --learning_rate 1e-4 \
+    --num_epochs 20 \
+    --checkpoint_dir ./checkpoints
+```
+
+**Multi-GPU Training:**
+```bash
+./run_multi_gpu_train.sh ./data 4  # 4 GPUs
+```
+
+**80GB GPU (Optimized):**
+```bash
+./train_80gb_gpu.sh ./data
+```
+
+### 3. Evaluate the Model
+
+```bash
+python evaluation/benchmark_prs_med.py \
+    --checkpoint ./checkpoints/training_*/best_model_epoch_*.pth \
+    --data_root ./data
+```
+
+## 📁 Project Structure
 
 ```
 prs_med_mmrs/
-├── models/                 # Core model components
-│   ├── image_encoder.py   # TinyVisionEncoder (TinySAM-based)
-│   ├── text_encoder.py    # MultimodalTextEncoder (DialoGPT + LoRA)
-│   ├── fusion_module.py   # CrossAttentionFusion
-│   ├── mask_decoder.py    # MaskDecoder (with interpolation)
-│   └── prs_med_model.py   # Main PRSMedModel
-├── data_pipeline/         # Data processing
-│   ├── dataset_mmrs.py    # MMRSDataset with position reasoning
-│   ├── transforms.py      # Image preprocessing
-│   └── templates/         # Question-answer templates
-├── training/              # Training components
-│   ├── train_loop.py      # Trainer class
-│   ├── losses.py          # Segmentation + Text losses
-│   ├── optimizer.py      # Optimizer configuration
-│   └── evaluation.py      # Evaluation metrics
-├── configs/               # Configuration system
-│   └── training_config.py # Training configurations
-├── scripts/               # Utility scripts
-│   ├── prepare_data.py    # Data preprocessing
-│   ├── train.py          # Training script
-│   ├── infer.py          # Inference script
-│   └── visualize.py       # Visualization utilities
-├── tests/                 # Test suite
-└── data/                  # Data directory
-    ├── raw/              # Raw datasets (6 modalities)
-    └── mmrs/             # Processed MMRS format
+├── train_prs_med.py              # Main training script
+├── evaluation/
+│   └── benchmark_prs_med.py      # Evaluation and benchmarking
+├── models/
+│   ├── vision_backbone/          # TinySAM vision encoder
+│   │   ├── tiny_sam_encoder.py
+│   │   └── tinysam/              # TinySAM implementation
+│   ├── mllm/                     # Multimodal LLM (LLaVA-Med)
+│   │   ├── llava_med_mllm.py
+│   │   └── llava_med_lora_adapter.py
+│   ├── decoder/                  # Decoder modules
+│   │   ├── fusion_module.py      # Feature fusion
+│   │   └── mask_prediction_module.py  # Mask generation
+│   └── loss/
+│       └── objective_function.py # Loss functions
+├── data/
+│   └── dataset.py                # Dataset and data loaders
+├── configs/
+│   └── hyperparameters.py        # Training hyperparameters
+├── weights/                       # Model checkpoints
+│   └── tinysam_42.3.pth
+├── checkpoints/                   # Training checkpoints
+├── run_multi_gpu_train.sh        # Multi-GPU training script
+├── train_80gb_gpu.sh            # Optimized script for large GPUs
+├── MEMORY_OPTIMIZATION.md        # Memory optimization guide
+├── MULTI_GPU_TRAINING.md         # Multi-GPU training guide
+└── REPRODUCIBILLITY.md           # Reproducibility guide
 ```
 
-## 🏥 **Supported Modalities**
+## 🎓 Training
 
-The implementation supports all 6 modalities from the paper:
+### Basic Training
+
+```bash
+python train_prs_med.py \
+    --data_root /path/to/data \
+    --batch_size 8 \
+    --learning_rate 1e-4 \
+    --num_epochs 20 \
+    --image_size 1024 \
+    --checkpoint_dir ./checkpoints
+```
+
+### Training Options
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--data_root` | Required | Path to data directory |
+| `--batch_size` | 8 | Batch size per GPU |
+| `--learning_rate` | 1e-4 | Learning rate |
+| `--num_epochs` | 20 | Number of training epochs |
+| `--image_size` | 1024 | Input image size |
+| `--lora_rank` | 16 | LoRA rank |
+| `--lora_alpha` | 16 | LoRA alpha |
+| `--lambda_seg` | 1.0 | Segmentation loss weight |
+| `--lambda_txt` | 0.5 | Text loss weight |
+| `--use_amp` | True | Enable mixed precision training |
+| `--gradient_accumulation_steps` | 1 | Gradient accumulation steps |
+| `--gradient_checkpointing` | False | Enable gradient checkpointing |
+| `--compile_model` | False | Compile model with torch.compile |
+
+### Memory Optimization
+
+For GPUs with limited memory, use gradient accumulation:
+
+```bash
+python train_prs_med.py \
+    --data_root ./data \
+    --batch_size 2 \
+    --gradient_accumulation_steps 4 \
+    --gradient_checkpointing \
+    --use_amp
+```
+
+See [MEMORY_OPTIMIZATION.md](MEMORY_OPTIMIZATION.md) for detailed guidance.
+
+### Checkpoint Saving
+
+Checkpoints are automatically saved:
+- **Best model**: When validation loss improves
+- **Periodic**: Every 5 epochs
+- **Initial**: After epoch 1 (for verification)
+- **Final**: At the end of training
+
+Checkpoints include:
+- Model state dict
+- Optimizer state
+- Epoch number
+- Timestamp
+
+## 📊 Evaluation
+
+Run evaluation on test data:
+
+```bash
+python evaluation/benchmark_prs_med.py \
+    --checkpoint ./checkpoints/training_*/best_model_epoch_*.pth \
+    --data_root ./data \
+    --batch_size 8
+```
+
+### Evaluation Metrics
+
+- **Dice Coefficient**: Segmentation overlap
+- **IoU Score**: Intersection over Union
+- **Hausdorff Distance**: Boundary accuracy
+- **Position Accuracy**: Position reasoning correctness
+
+## 🧠 Model Architecture
+
+### Components
+
+1. **TinySAM Vision Backbone**: Lightweight image encoder
+   - Input: 1024×1024 medical images
+   - Output: 256-channel feature maps (16×16)
+
+2. **LLaVA-Med MLLM**: Multimodal language model
+   - Base: Mistral-7B with LoRA adaptation
+   - Processes images and text prompts
+   - Output: Multimodal embeddings
+
+3. **Fusion Module**: Cross-attention fusion
+   - Combines visual and textual features
+   - Output: Fused 256-channel features
+
+4. **Mask Prediction Module**: Decoder
+   - Upsamples from 16×16 to 1024×1024
+   - Generates binary segmentation masks
+
+### Forward Pass
+
+```
+Image (1024×1024) → TinySAM → Visual Features (256×16×16)
+                                 ↓
+Text Prompt → LLaVA-Med → Multimodal Embeddings
+                                 ↓
+                    Fusion Module → Fused Features
+                                 ↓
+                    Mask Predictor → Mask (1024×1024)
+```
+
+## 💾 Memory Optimization
+
+The implementation includes several memory optimizations:
+
+1. **Mixed Precision Training (AMP)**: ~50% memory reduction
+2. **Gradient Accumulation**: Effective larger batch sizes
+3. **Gradient Checkpointing**: Trade compute for memory
+4. **Model Compilation**: Additional memory savings
+
+See [MEMORY_OPTIMIZATION.md](MEMORY_OPTIMIZATION.md) for:
+- Configuration recommendations by GPU size
+- Memory usage breakdown
+- Troubleshooting guide
+
+## 🔄 Multi-GPU Training
+
+Train on multiple GPUs using distributed data parallel (DDP):
+
+```bash
+# Using torchrun
+torchrun --nproc_per_node=4 train_prs_med.py \
+    --data_root ./data \
+    --batch_size 8
+
+# Using provided script
+./run_multi_gpu_train.sh ./data 4
+```
+
+**Features:**
+- Automatic distributed setup
+- Gradient synchronization across GPUs
+- Checkpoint saving only on rank 0
+- Proper data shuffling with DistributedSampler
+
+See [MULTI_GPU_TRAINING.md](MULTI_GPU_TRAINING.md) for detailed guide.
+
+## 🏥 Supported Modalities
+
+The model supports multiple medical imaging modalities:
 
 1. **Brain Tumors CT Scan** (`brain_tumors_ct_scan`)
-2. **Breast Tumors CT Scan** (`breast_tumors_ct_scan`) 
+2. **Breast Tumors CT Scan** (`breast_tumors_ct_scan`)
 3. **Dental X-ray** (`dental_xray`)
 4. **Lung CT** (`lung_CT`)
 5. **Lung X-ray** (`lung_Xray`)
 6. **Polyp Endoscopy** (`polyp_endoscopy`)
 7. **Skin RGB Image** (`skin_rgbimage`)
 
-## 🧠 **Model Architecture**
+## ⚙️ Configuration
 
-### **PRS-Med Components:**
+### Hyperparameters
 
-1. **TinyVisionEncoder**: Lightweight image encoder based on TinySAM
-2. **MultimodalTextEncoder**: Text encoder with LoRA adaptation
-3. **CrossAttentionFusion**: Fuses visual and textual features
-4. **MaskDecoder**: Generates segmentation masks with position reasoning
+Default hyperparameters (from paper):
 
-### **Key Features:**
-- ✅ **Position Reasoning**: Understands spatial relationships
-- ✅ **Multi-modal**: Works across 6+ imaging modalities  
-- ✅ **Template-based QA**: Uses 50+ question-answer templates
-- ✅ **LoRA Adaptation**: Efficient fine-tuning
-- ✅ **Comprehensive Evaluation**: Dice, IoU, Hausdorff, Position Accuracy
-
-## 📊 **Training Configuration**
-
-### **Available Configurations:**
-- `single_modality`: Train on one modality (fast)
-- `multi_modality`: Train on 3 modalities (balanced)
-- `all_modalities`: Train on all 6 modalities (full)
-- `fast_test`: Quick test run (5 epochs)
-
-### **Training Parameters:**
 ```python
-# Default training config
 batch_size = 8
-epochs = 50
 learning_rate = 1e-4
+num_epochs = 20
+image_size = 1024
+lora_rank = 16
+lora_alpha = 16
+lora_dropout = 0.05
 lambda_seg = 1.0      # Segmentation loss weight
-lambda_text = 1.0     # Text loss weight
-device = "mps"        # or "cuda" or "cpu"
+lambda_txt = 0.5      # Text loss weight
+weight_decay = 0.01
+max_grad_norm = 1.0
 ```
 
-## 🎯 **Position Reasoning**
+See `configs/hyperparameters.py` for all configuration options.
 
-The model generates position descriptions like:
-- `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"`
-- `"near-center"` (within threshold distance)
-- Contextual descriptions based on image type
+### Position Reasoning
 
-### **Question Templates:**
-- "Where is the lesion located in this {image_type}?"
+The model uses template-based question-answer pairs:
+
+**Questions:**
+- "Where is the lesion located in this {modality}?"
 - "What is the anatomical position of the tumour?"
 - "Can you identify the tumour's location?"
 
-## 📈 **Evaluation Metrics**
+**Answers:**
+- Position descriptions: "top-left", "top-right", "bottom-left", "bottom-right"
+- Contextual: "near-center", "upper region", etc.
 
-### **Segmentation Metrics:**
-- **Dice Coefficient**: Overlap between predicted and ground truth masks
-- **IoU Score**: Intersection over Union
-- **Hausdorff Distance**: Boundary accuracy
+## 🐛 Troubleshooting
 
-### **Position Reasoning Metrics:**
-- **Exact Match**: Perfect position description match
-- **Keyword Match**: Position keyword accuracy
+### Out of Memory (OOM) Errors
 
-## 🔧 **Advanced Usage**
+1. **Reduce batch size**:
+   ```bash
+   --batch_size 2 --gradient_accumulation_steps 4
+   ```
 
-### **Custom Training:**
-```python
-from configs.training_config import get_config, TrainingConfig
+2. **Enable gradient checkpointing**:
+   ```bash
+   --gradient_checkpointing
+   ```
 
-# Get predefined config
-config = get_config("multi_modality")
+3. **Check disk space**: Ensure at least 10GB free for checkpoints
 
-# Or create custom config
-custom_config = TrainingConfig(
-    modalities=["brain_tumors_ct_scan", "lung_CT"],
-    epochs=100,
-    batch_size=4,
-    learning_rate=5e-5
-)
-```
+See [MEMORY_OPTIMIZATION.md](MEMORY_OPTIMIZATION.md) for detailed solutions.
 
-### **Data Pipeline:**
-```python
-from data_pipeline.dataset_mmrs import MMRSDataset
+### Checkpoint Saving Issues
 
-# Create dataset
-dataset = MMRSDataset(
-    root="data/mmrs/brain_tumors_ct_scan/train",
-    split="train",
-    img_size=224,
-    tokenizer=tokenizer
-)
+- **Disk space**: Check available disk space
+- **Permissions**: Ensure write permissions on checkpoint directory
+- **File system**: Network mounts may cause issues
 
-# Get sample
-sample = dataset[0]
-print(sample["question"])  # "Where is the lesion located in this Brain Ct Scan?"
-print(sample["answer"])    # "The tumour is located in the top-left region."
-```
+The implementation includes automatic retry logic and atomic writes.
 
-## 🧪 **Testing**
+### Distributed Training Issues
 
-Run the complete test suite:
-```bash
-uv run python -m pytest tests/ -v
-```
+- **Port conflicts**: Change `--master_port` if using multiple jobs
+- **NCCL errors**: Ensure GPUs are visible with `nvidia-smi`
+- **Hanging**: Check network connectivity between nodes
 
-Tests cover:
-- ✅ Model components (image encoder, fusion, mask decoder)
-- ✅ Training pipeline (losses, optimizer, trainer)
-- ✅ Data pipeline (centroid computation, position labeling)
+## 📚 References
 
-## 📚 **Paper Implementation Status**
+- **Paper**: [PRS-Med: Position Reasoning Segmentation with Vision-Language Model in Medical Imaging](https://arxiv.org/pdf/2505.11872)
+- **TinySAM**: [TinySAM: Segment Anything Model in Less Than 50MB](https://github.com/xinghaochen/TinySAM)
+- **LLaVA-Med**: [LLaVA-Med: Training a Large Language-and-Vision Assistant for Biomedicine](https://github.com/microsoft/LLaVA-Med)
 
-### **✅ Completed:**
-- [x] Core model architecture (TinyVisionEncoder + MultimodalTextEncoder)
-- [x] Cross-attention fusion module
-- [x] Mask decoder with interpolation
-- [x] Position reasoning dataset (MMRS)
-- [x] Template-based question generation
-- [x] Multi-modal training pipeline
-- [x] Comprehensive evaluation metrics
-- [x] Configuration system
+## 📄 License
 
-### **🔄 Remaining (Optional Enhancements):**
-- [ ] Advanced visualization tools
-- [ ] Model ensemble support
-- [ ] Hyperparameter optimization
-- [ ] Cross-validation pipeline
-- [ ] Model compression/quantization
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🚀 **Next Steps**
+## 🙏 Acknowledgments
 
-1. **Prepare your data**: Run `uv run python main.py prepare`
-2. **Start training**: Run `uv run python main.py train`
-3. **Monitor progress**: Check outputs in `outputs/` directory
-4. **Evaluate results**: Use evaluation metrics in `training/evaluation.py`
+- TinySAM team for the efficient vision encoder
+- LLaVA-Med team for the multimodal language model
+- PyTorch team for the excellent deep learning framework
 
-## 📖 **References**
+## 🤝 Contributing
 
-- [PRS-Med Paper](https://arxiv.org/pdf/2505.11872): Position Reasoning Segmentation with Vision-Language Model in Medical Imaging
-- **Datasets**: BUSI, LungCT, LungXray, BrainMRI, Kvasir-SEG, ClinicDB, CVC300, ColonDB, ETIS-Polyric
-- **Base Models**: TinySAM, DialoGPT, LoRA
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📧 Contact
+
+For questions or issues, please open an issue on GitHub.
 
 ---
 
