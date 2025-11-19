@@ -303,7 +303,9 @@ def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
 
             # Convert token predictions back to text
             pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
-            pred_text_batch = model.mllm.processor.batch_decode(pred_ids, skip_special_tokens=True)
+            # Handle both regular and DDP-wrapped models
+            mllm_model = model.module if hasattr(model, 'module') else model
+            pred_text_batch = mllm_model.mllm.processor.batch_decode(pred_ids, skip_special_tokens=True)
             pred_texts.extend(pred_text_batch)
             gt_texts.extend(gt_answers)
 
@@ -340,22 +342,167 @@ def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
     }
 
 
-if __name__ == "__main__":
-    from train_prs_med import PRSMedModel
-    dummy_model = PRSMedModel()
+def load_model_from_checkpoint(checkpoint_path: str, args, device):
+    """
+    Load PRS-Med model from checkpoint.
     
-    dummy_imgs = torch.randn(2, 3, 1024, 1024)
-    dummy_masks = (torch.rand(2, 1, 1024, 1024) > 0.5).float()
-    dummy_tokens = torch.randint(0, 32064, (2, 595))
-    dummy_questions = ["Where is the tumor?", "Locate the lesion region."]
-    dummy_answers = ["top right lobe", "center of image"]
+    Args:
+        checkpoint_path: Path to checkpoint file (.pth)
+        args: Arguments object with model configuration
+        device: Device to load model on
+    
+    Returns:
+        Loaded model
+    """
+    from train_prs_med import PRSMedModel
+    
+    print(f"Loading model from checkpoint: {checkpoint_path}")
+    
+    # Initialize model
+    model = PRSMedModel(args, device)
+    
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Handle different checkpoint formats
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+    else:
+        state_dict = checkpoint
+        print("Loaded checkpoint (no epoch info found)")
+    
+    # Load state dict
+    model.load_state_dict(state_dict, strict=False)
+    
+    print("✓ Model loaded successfully")
+    return model
 
-    dummy_ds = [
-        (dummy_imgs[i], [dummy_questions[i]], dummy_masks[i], dummy_tokens[i], dummy_answers[i])
-        for i in range(2)
-    ]
-    dummy_loader = DataLoader(dummy_ds, batch_size=1)
 
-    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    metrics = evaluate_prs_med(dummy_model, dummy_loader, device)
-    print(metrics)
+def main():
+    import argparse
+    import json
+    from pathlib import Path
+    from data.dataset import PRSMedDataset
+    
+    parser = argparse.ArgumentParser(description='Evaluate PRS-Med Model')
+    parser.add_argument('--checkpoint', type=str, required=True,
+                       help='Path to model checkpoint (.pth file)')
+    parser.add_argument('--data_root', type=str, required=True,
+                       help='Root directory of the dataset')
+    parser.add_argument('--split', type=str, default='test',
+                       choices=['train', 'val', 'test'],
+                       help='Dataset split to evaluate on (default: test)')
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Batch size for evaluation (default: 8)')
+    parser.add_argument('--num_workers', type=int, default=2,
+                       help='Number of data loader workers (default: 2)')
+    parser.add_argument('--image_size', type=int, default=1024,
+                       help='Image size (default: 1024)')
+    parser.add_argument('--tinysam_checkpoint', type=str, default='weights/tinysam_42.3.pth',
+                       help='Path to TinySAM checkpoint (default: weights/tinysam_42.3.pth)')
+    parser.add_argument('--lora_rank', type=int, default=16,
+                       help='LoRA rank (default: 16)')
+    parser.add_argument('--lora_alpha', type=int, default=16,
+                       help='LoRA alpha (default: 16)')
+    parser.add_argument('--lora_dropout', type=float, default=0.05,
+                       help='LoRA dropout (default: 0.05)')
+    parser.add_argument('--use_llm_eval', action='store_true', default=False,
+                       help='Use LLM-based text evaluation (requires HF_TOKEN)')
+    parser.add_argument('--output_dir', type=str, default=None,
+                       help='Directory to save evaluation results (optional)')
+    parser.add_argument('--specific_dataset', type=str, default=None,
+                       help='Evaluate on specific dataset only (optional)')
+    
+    args = parser.parse_args()
+    
+    # Set device
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"Using device: CUDA ({torch.cuda.get_device_name(0)})")
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print("Using device: MPS")
+    else:
+        device = torch.device('cpu')
+        print("Using device: CPU")
+    
+    # Load model
+    model = load_model_from_checkpoint(args.checkpoint, args, device)
+    model.eval()
+    
+    # Load dataset
+    print(f"\nLoading {args.split} dataset from {args.data_root}...")
+    test_dataset = PRSMedDataset(
+        split=args.split,
+        data_root=args.data_root,
+        specific_dataset=args.specific_dataset
+    )
+    
+    print(f"Dataset size: {len(test_dataset)} samples")
+    if args.specific_dataset:
+        print(f"Evaluating on dataset: {args.specific_dataset}")
+    
+    # Create data loader
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True if device.type == 'cuda' else False
+    )
+    
+    # Run evaluation
+    print(f"\n{'='*60}")
+    print(f"Starting evaluation on {args.split} split")
+    print(f"{'='*60}\n")
+    
+    metrics = evaluate_prs_med(model, test_loader, device, use_llm_eval=args.use_llm_eval)
+    
+    # Save results if output directory specified
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create results filename
+        checkpoint_name = Path(args.checkpoint).stem
+        results_file = output_dir / f"results_{args.split}_{checkpoint_name}.json"
+        
+        # Add metadata
+        results = {
+            'checkpoint': args.checkpoint,
+            'split': args.split,
+            'dataset_size': len(test_dataset),
+            'specific_dataset': args.specific_dataset,
+            'metrics': metrics
+        }
+        
+        # Save JSON
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"\n✓ Results saved to: {results_file}")
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("Evaluation Summary:")
+    print(f"{'='*60}")
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"Split: {args.split}")
+    print(f"Dataset size: {len(test_dataset)}")
+    print(f"\nSegmentation Metrics:")
+    print(f"  mDice:  {metrics['mDice']:.4f}")
+    print(f"  mIoU:   {metrics['mIoU']:.4f}")
+    print(f"  mHD95:  {metrics['mHD95']:.2f}" if metrics['mHD95'] != float('inf') else f"  mHD95:  inf")
+    print(f"\nPosition Reasoning Metrics:")
+    print(f"  Exact Match Accuracy:  {metrics.get('exact_match_acc', 0):.4f}")
+    print(f"  Keyword Match Accuracy: {metrics.get('keyword_match_acc', 0):.4f}")
+    if 'qwen_acc' in metrics:
+        print(f"  Qwen Accuracy:        {metrics['qwen_acc']:.4f}")
+        print(f"  LLaMA Accuracy:       {metrics['llama_acc']:.4f}")
+        print(f"  Ensemble Accuracy:    {metrics['ensemble_acc']:.4f}")
+    print(f"{'='*60}\n")
+
+
+if __name__ == "__main__":
+    main()
