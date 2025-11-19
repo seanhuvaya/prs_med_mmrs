@@ -13,6 +13,10 @@ load_dotenv()
 
 
 def dice_coefficient(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e-6):
+    """
+    Compute Dice coefficient per sample.
+    Returns per-sample Dice scores for proper aggregation across dataset.
+    """
     # Resize predicted mask to match ground truth resolution
     if pred_mask.shape != true_mask.shape:
         pred_mask = F.interpolate(pred_mask, size=true_mask.shape[2:], mode="bilinear", align_corners=False)
@@ -23,11 +27,15 @@ def dice_coefficient(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e
     dice = (2. * intersection + smooth) / (
         pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) + smooth
     )
-    return dice.mean().item()
+    return dice.cpu().numpy()  # Return per-sample scores
 
 
 def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e-6):
-    # 🔧 Ensure both tensors have same spatial resolution
+    """
+    Compute IoU score per sample.
+    Returns per-sample IoU scores for proper aggregation across dataset.
+    """
+    # Ensure both tensors have same spatial resolution
     if pred_mask.shape != true_mask.shape:
         pred_mask = F.interpolate(pred_mask, size=true_mask.shape[2:], mode="bilinear", align_corners=False)
 
@@ -36,12 +44,12 @@ def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e-6):
     intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
     union = (pred_mask + true_mask - pred_mask * true_mask).sum(dim=(1, 2, 3))
     iou = (intersection + smooth) / (union + smooth)
-    return iou.mean().item()
+    return iou.cpu().numpy()  # Return per-sample scores
 
 
-def hausdorff_distance(pred_mask: torch.Tensor, true_mask: torch.Tensor, percentile: float = 95.0) -> float:
+def hausdorff_distance_per_sample(pred_mask: torch.Tensor, true_mask: torch.Tensor, percentile: float = 95.0):
     """
-    Compute Hausdorff Distance (HD) and 95th percentile Hausdorff Distance (HD95).
+    Compute 95th percentile Hausdorff Distance (HD95) per sample.
     
     The Hausdorff distance measures the maximum distance between boundaries of 
     predicted and ground truth masks. HD95 uses the 95th percentile to be more 
@@ -53,7 +61,7 @@ def hausdorff_distance(pred_mask: torch.Tensor, true_mask: torch.Tensor, percent
         percentile: Percentile for HD95 (default: 95.0)
     
     Returns:
-        HD95 distance (float)
+        Per-sample HD95 distances (numpy array)
     """
     # Resize if needed
     if pred_mask.shape != true_mask.shape:
@@ -76,8 +84,7 @@ def hausdorff_distance(pred_mask: torch.Tensor, true_mask: torch.Tensor, percent
             hd95_scores.append(float('inf'))
             continue
         
-        # Get boundary points
-        # Use morphological operations to extract boundaries
+        # Get boundary points using morphological operations
         pred_boundary = pred_np.astype(bool) & ~binary_erosion(pred_np.astype(bool))
         true_boundary = true_np.astype(bool) & ~binary_erosion(true_np.astype(bool))
         
@@ -89,14 +96,7 @@ def hausdorff_distance(pred_mask: torch.Tensor, true_mask: torch.Tensor, percent
             hd95_scores.append(float('inf'))
             continue
         
-        # Compute directed Hausdorff distances
-        hd_forward = directed_hausdorff(pred_coords, true_coords)[0]
-        hd_backward = directed_hausdorff(true_coords, pred_coords)[0]
-        
-        # Symmetric Hausdorff distance
-        hd = max(hd_forward, hd_backward)
-        
-        # For HD95, we compute distances from each point to the other set
+        # For HD95, compute distances from each point to the other set
         # and take the 95th percentile
         distances_forward = []
         for point in pred_coords:
@@ -116,12 +116,7 @@ def hausdorff_distance(pred_mask: torch.Tensor, true_mask: torch.Tensor, percent
         
         hd95_scores.append(hd95)
     
-    # Return mean HD95, handling inf values
-    valid_scores = [s for s in hd95_scores if s != float('inf')]
-    if len(valid_scores) == 0:
-        return float('inf')
-    
-    return np.mean(valid_scores)
+    return np.array(hd95_scores)  # Return per-sample scores
 
 
 def evaluate_position_reasoning_simple(pred_texts: List[str], gt_texts: List[str]) -> Dict[str, float]:
@@ -178,93 +173,32 @@ def evaluate_position_reasoning_simple(pred_texts: List[str], gt_texts: List[str
     }
 
 
-def evaluate_text_reasoning(pred_texts: List[str], gt_texts: List[str], use_llm: bool = True) -> Dict[str, float]:
+def evaluate_text_reasoning(pred_texts: List[str], gt_texts: List[str]) -> Dict[str, float]:
     """
-    Comprehensive position reasoning evaluation using both simple keyword matching
-    and LLM-based semantic similarity (if available).
+    Position reasoning evaluation using keyword matching.
+    This matches standard evaluation practices in medical segmentation papers.
     
     Args:
         pred_texts: List of predicted position descriptions
         gt_texts: List of ground truth position descriptions
-        use_llm: Whether to use LLM-based evaluation (requires HF_TOKEN)
     
     Returns:
         Dictionary with evaluation metrics
     """
-    results = {}
-    
-    # Simple keyword-based evaluation (always available)
-    simple_metrics = evaluate_position_reasoning_simple(pred_texts, gt_texts)
-    results.update(simple_metrics)
-    
-    # LLM-based evaluation (if available)
-    if use_llm:
-        try:
-            import os
-            from huggingface_hub import InferenceClient
-            
-            HF_TOKEN = os.getenv("HF_TOKEN")
-            if not HF_TOKEN:
-                print("Warning: HF_TOKEN not found, skipping LLM-based evaluation")
-                return results
-            
-            QWEN_MODEL = os.getenv("QWEN_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-            LLAMA_MODEL = os.getenv("LLAMA_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
-            
-            qwen_client = InferenceClient(model=QWEN_MODEL, token=HF_TOKEN)
-            llama_client = InferenceClient(model=LLAMA_MODEL, token=HF_TOKEN)
-            
-            SYSTEM_MSG = (
-                "You are evaluating if two medical position descriptions refer to the same region. "
-                "If they describe the same anatomical position (even if phrased differently), "
-                "respond only with 'yes'. Otherwise, respond with 'no'."
-            )
-            
-            def ask_hf(client: InferenceClient, pred: str, gt: str) -> int:
-                try:
-                    resp = client.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": SYSTEM_MSG},
-                            {"role": "user", "content": f'Ground Truth: "{gt}"\nPredicted Answer: "{pred}"'}
-                        ],
-                        temperature=0.0,
-                        max_tokens=8,
-                        top_p=1.0,
-                        seed=0,
-                    )
-                    text = resp.choices[0].message["content"].strip().lower()
-                    return 1 if "yes" in text and "no" not in text else 0
-                except Exception as e:
-                    print(f"[HF error] {e}")
-                    return 0
-            
-            qwen_scores, llama_scores = [], []
-            for pred, gt in tqdm(zip(pred_texts, gt_texts), total=len(gt_texts), 
-                                desc="Evaluating text reasoning (LLM)"):
-                qwen_scores.append(ask_hf(qwen_client, pred, gt))
-                llama_scores.append(ask_hf(llama_client, pred, gt))
-            
-            results["qwen_acc"] = float(np.mean(qwen_scores)) if len(qwen_scores) else 0.0
-            results["llama_acc"] = float(np.mean(llama_scores)) if len(llama_scores) else 0.0
-            results["ensemble_acc"] = float(np.mean([results["qwen_acc"], results["llama_acc"]]))
-            
-        except Exception as e:
-            print(f"Warning: LLM evaluation failed: {e}")
-            print("Falling back to keyword-based evaluation only")
-    
-    return results
+    # Use simple keyword-based evaluation (standard in papers)
+    return evaluate_position_reasoning_simple(pred_texts, gt_texts)
 
 
 
-def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
+def evaluate_prs_med(model, data_loader, device):
     """
-    Comprehensive evaluation of PRS-Med model.
+    Evaluation of PRS-Med model following standard medical segmentation practices.
+    Metrics are computed per-sample and aggregated across the entire dataset.
     
     Args:
         model: PRS-Med model
         data_loader: DataLoader with test data
         device: Device to run evaluation on
-        use_llm_eval: Whether to use LLM-based text evaluation
     
     Returns:
         Dictionary with all evaluation metrics
@@ -272,7 +206,10 @@ def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
     model.to(device)
     model.eval()
     
-    dice_scores, iou_scores, hd95_scores = [], [], []
+    # Collect per-sample scores across entire dataset
+    all_dice_scores = []
+    all_iou_scores = []
+    all_hd95_scores = []
     pred_texts, gt_texts = [], []
 
     with torch.no_grad():
@@ -291,15 +228,14 @@ def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
             
             outputs = model(images, questions)
 
-            # Segmentation metrics
-            d = dice_coefficient(outputs["z_mask"], gt_masks)
-            i = iou_score(outputs["z_mask"], gt_masks)
-            hd95 = hausdorff_distance(outputs["z_mask"], gt_masks)
+            # Segmentation metrics - compute per-sample
+            dice_per_sample = dice_coefficient(outputs["z_mask"], gt_masks)
+            iou_per_sample = iou_score(outputs["z_mask"], gt_masks)
+            hd95_per_sample = hausdorff_distance_per_sample(outputs["z_mask"], gt_masks)
             
-            dice_scores.append(d)
-            iou_scores.append(i)
-            if hd95 != float('inf'):
-                hd95_scores.append(hd95)
+            all_dice_scores.extend(dice_per_sample)
+            all_iou_scores.extend(iou_per_sample)
+            all_hd95_scores.extend(hd95_per_sample)
 
             # Convert token predictions back to text
             pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
@@ -309,35 +245,41 @@ def evaluate_prs_med(model, data_loader, device, use_llm_eval: bool = True):
             pred_texts.extend(pred_text_batch)
             gt_texts.extend(gt_answers)
 
-    # Compute segmentation metrics
-    mdice = np.mean(dice_scores)
-    miou = np.mean(iou_scores)
-    mhd95 = np.mean(hd95_scores) if len(hd95_scores) > 0 else float('inf')
+    # Aggregate metrics across all samples (standard practice)
+    all_dice_scores = np.array(all_dice_scores)
+    all_iou_scores = np.array(all_iou_scores)
+    all_hd95_scores = np.array(all_hd95_scores)
+    
+    # Compute mean Dice and IoU
+    mdice = np.mean(all_dice_scores)
+    miou = np.mean(all_iou_scores)
+    
+    # Compute mean HD95, excluding inf values (standard practice)
+    valid_hd95 = all_hd95_scores[all_hd95_scores != float('inf')]
+    if len(valid_hd95) > 0:
+        mhd95 = np.mean(valid_hd95)
+    else:
+        mhd95 = float('inf')
     
     print(f"\n{'='*60}")
-    print(f"Segmentation Metrics:")
+    print(f"Segmentation Metrics (computed per-sample, aggregated across dataset):")
     print(f"  mDice:  {mdice:.4f}")
     print(f"  mIoU:   {miou:.4f}")
     print(f"  mHD95:  {mhd95:.2f}" if mhd95 != float('inf') else f"  mHD95:  inf")
     print(f"{'='*60}")
 
     # Position reasoning metrics
-    text_metrics = evaluate_text_reasoning(pred_texts, gt_texts, use_llm=use_llm_eval)
+    text_metrics = evaluate_text_reasoning(pred_texts, gt_texts)
     
     print(f"\nPosition Reasoning Metrics:")
     print(f"  Exact Match Accuracy:  {text_metrics.get('exact_match_acc', 0):.4f}")
     print(f"  Keyword Match Accuracy: {text_metrics.get('keyword_match_acc', 0):.4f}")
-    
-    if 'qwen_acc' in text_metrics:
-        print(f"  Qwen Accuracy:        {text_metrics['qwen_acc']:.4f}")
-        print(f"  LLaMA Accuracy:       {text_metrics['llama_acc']:.4f}")
-        print(f"  Ensemble Accuracy:    {text_metrics['ensemble_acc']:.4f}")
     print(f"{'='*60}\n")
 
     return {
-        "mDice": mdice,
-        "mIoU": miou,
-        "mHD95": mhd95,
+        "mDice": float(mdice),
+        "mIoU": float(miou),
+        "mHD95": float(mhd95) if mhd95 != float('inf') else float('inf'),
         **text_metrics
     }
 
@@ -407,8 +349,6 @@ def main():
                        help='LoRA alpha (default: 16)')
     parser.add_argument('--lora_dropout', type=float, default=0.05,
                        help='LoRA dropout (default: 0.05)')
-    parser.add_argument('--use_llm_eval', action='store_true', default=False,
-                       help='Use LLM-based text evaluation (requires HF_TOKEN)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Directory to save evaluation results (optional)')
     parser.add_argument('--specific_dataset', type=str, default=None,
@@ -457,7 +397,7 @@ def main():
     print(f"Starting evaluation on {args.split} split")
     print(f"{'='*60}\n")
     
-    metrics = evaluate_prs_med(model, test_loader, device, use_llm_eval=args.use_llm_eval)
+    metrics = evaluate_prs_med(model, test_loader, device)
     
     # Save results if output directory specified
     if args.output_dir:
@@ -497,10 +437,6 @@ def main():
     print(f"\nPosition Reasoning Metrics:")
     print(f"  Exact Match Accuracy:  {metrics.get('exact_match_acc', 0):.4f}")
     print(f"  Keyword Match Accuracy: {metrics.get('keyword_match_acc', 0):.4f}")
-    if 'qwen_acc' in metrics:
-        print(f"  Qwen Accuracy:        {metrics['qwen_acc']:.4f}")
-        print(f"  LLaMA Accuracy:       {metrics['llama_acc']:.4f}")
-        print(f"  Ensemble Accuracy:    {metrics['ensemble_acc']:.4f}")
     print(f"{'='*60}\n")
 
 
