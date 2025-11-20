@@ -157,6 +157,9 @@ class PRSMedDataset(Dataset):
         
         # Squeeze singleton dimensions
         array = np.squeeze(array)
+        # Handle shapes like (1, 1, N) by collapsing the redundant axes
+        if array.ndim == 3 and array.shape[0] == 1 and array.shape[1] == 1:
+            array = array.reshape(1, array.shape[2])
         
         # Normalize dtype for PIL compatibility
         if array.dtype != np.uint8:
