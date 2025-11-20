@@ -108,9 +108,9 @@ class PRSMedDataset(Dataset):
         mask_path = re.sub(r"/(train|test|val)_images/", r"/\1_masks/", row["image_path"])
         mask_path = os.path.join(self.data_root, self.img_dir, mask_path)
         
-        # Load image and mask
-        image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        # Load image and mask (supports standard formats and .npz tensors)
+        image = self._load_image_file(image_path, is_mask=False)
+        mask = self._load_image_file(mask_path, is_mask=True)
         
         # Apply transforms
         image = self.transform(image)
@@ -124,6 +124,71 @@ class PRSMedDataset(Dataset):
             'dataset': row['dataset_name'],
             'image_path': image_path
         }
+
+    def _load_image_file(self, path, is_mask: bool):
+        """Load an image or mask from common formats or .npz files."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".npz":
+            array = self._load_npz_array(path)
+            pil_img = self._np_to_pil(array, is_mask=is_mask)
+        else:
+            pil_img = Image.open(path)
+        return pil_img.convert("L" if is_mask else "RGB")
+
+    @staticmethod
+    def _load_npz_array(path: str):
+        """Load numpy array from .npz file, supporting arbitrary key names."""
+        data = np.load(path)
+        try:
+            if "arr_0" in data.files:
+                array = data["arr_0"]
+            else:
+                # Fallback to the first available key
+                array = data[data.files[0]]
+        finally:
+            data.close()
+        return array
+
+    @staticmethod
+    def _np_to_pil(array: np.ndarray, is_mask: bool):
+        """Convert numpy array to PIL Image while handling channel layouts."""
+        if not isinstance(array, np.ndarray):
+            array = np.array(array)
+        
+        # Squeeze singleton dimensions
+        array = np.squeeze(array)
+        
+        # Normalize dtype for PIL compatibility
+        if array.dtype != np.uint8:
+            # Preserve binary masks without scaling
+            if is_mask and np.array_equal(np.unique(array), [0, 1]):
+                array = (array * 255).astype(np.uint8)
+            else:
+                array = array.astype(np.float32)
+                min_val = array.min()
+                max_val = array.max()
+                if max_val > min_val:
+                    array = (array - min_val) / (max_val - min_val)
+                array = (array * 255).clip(0, 255).astype(np.uint8)
+        
+        if is_mask:
+            if array.ndim == 3:
+                # Reduce multi-channel mask to single channel
+                array = array[..., 0]
+            return Image.fromarray(array, mode="L")
+        
+        # Handle image channels
+        if array.ndim == 2:
+            array = np.stack([array] * 3, axis=-1)
+        elif array.ndim == 3:
+            if array.shape[0] in (1, 3) and array.shape[0] != array.shape[-1]:
+                array = np.transpose(array, (1, 2, 0))
+            if array.shape[-1] == 1:
+                array = np.repeat(array, 3, axis=-1)
+        else:
+            raise ValueError(f"Unsupported array shape for image conversion: {array.shape}")
+        
+        return Image.fromarray(array.astype(np.uint8), mode="RGB")
 
 class PRSMedDataLoader:
     def __init__(self, batch_size=8, num_workers=4, data_root="data", max_samples=None):
