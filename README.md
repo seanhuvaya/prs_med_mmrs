@@ -14,6 +14,9 @@ A complete PyTorch implementation of **PRS-Med** (Position Reasoning Segmentatio
 - [Project Structure](#-project-structure)
 - [Training](#-training)
 - [Evaluation](#-evaluation)
+- [Testing](#-testing)
+ - [Testing](#-testing)
+ - [MLLM and Paper Compliance](#-mllm-and-paper-compliance)
 - [Model Architecture](#-model-architecture)
 - [Memory Optimization](#-memory-optimization)
 - [Multi-GPU Training](#-multi-gpu-training)
@@ -63,6 +66,91 @@ mkdir -p weights
 # Download tinysam_42.3.pth to weights/tinysam_42.3.pth
 ```
 
+## ✅ Testing
+
+Run the unit tests with uv using Python's built-in unittest discovery. Make sure dependencies are installed first:
+
+```bash
+# Install project dependencies
+uv sync
+
+# Run the full test suite
+uv run python -m unittest discover -s tests -p "test_*.py"
+
+# Run in verbose mode
+uv run python -m unittest -v discover -s tests -p "test_*.py"
+
+# Run a single test module
+uv run python -m unittest tests.test_tiny_sam_encoder
+
+# Run a single test case or method
+uv run python -m unittest tests.test_tiny_sam_encoder.TestTinySamEncoder.test_forward_output_shape_cpu
+```
+
+Notes:
+- The tests mock checkpoint loading, so no real weights are required.
+- If you encounter environment issues, ensure you're using Python 3.11+ and have run `uv sync`.
+
+## 🧪 MLLM and Paper Compliance
+
+The MLLM wrapper (LLava-Med) in this repository is implemented in models/mllm/llava_med_mllm.py using the official Hugging Face LlavaForConditionalGeneration and AutoProcessor for the model chaoyinshe/llava-med-v1.5-mistral-7b-hf.
+
+What we do:
+- Use AutoProcessor and LlavaForConditionalGeneration with output_hidden_states enabled.
+- Prepare prompts with a LLaVA-style template that includes the <image> token.
+- Expose a paper_preset flag and a prompt_template parameter to mirror the paper’s formatting choices.
+- Provide a lightweight projection head (4096 -> 256) to condition downstream modules.
+- Optionally freeze the LLM parameters (freeze_llm=True by default).
+
+Example usage:
+
+```python
+from PIL import Image
+from models.mllm.llava_med_mllm import LLavaMedMLLM
+
+# Create a dummy image
+pil_image = Image.new("RGB", (512, 512), (128, 128, 128))
+
+mllm = LLavaMedMLLM(device="cuda", paper_preset=True, freeze_llm=True)
+out = mllm([pil_image], ["Where is the lesion?"])
+z_emb, z_txt, pred_ids = out["z_emb"], out["z_txt"], out["pred_ids"]
+z_proj = out.get("z_emb_proj")  # 256-dim projection
+```
+
+Notes on compliance:
+- We follow the model and prompting interface consistent with LLaVA‑Med v1.5 Mistral-7B. The paper’s exact prompt template and feature usage can vary between releases; use paper_preset=True to select the included default paper-aligned template or provide your own via prompt_template.
+- Hidden state selection defaults to the last layer’s hidden states, which is common practice; adjust downstream consumption as needed if your setup requires pooled or earlier-layer representations.
+
+Paper verification checklist:
+- Prompt template includes the <image> token and follows chat-style format:
+  - Example: "USER: <image>\n{question}\nASSISTANT:"
+- Hidden state layer used for features:
+  - Configure with hidden_state_layer (int index or 'last'). Defaults to 'last'.
+- Visual token pooling strategy:
+  - visual_pooling: 'none' (token-level), 'mean' (mean over L), or 'cls' (first token). Defaults to 'none'.
+- Reproducible configuration:
+  - Set paper_preset=True for default paper-aligned choices and override as needed.
+
+Example with verification knobs:
+```python
+from PIL import Image
+from models.mllm.llava_med_mllm import LLavaMedMLLM
+
+pil_image = Image.new("RGB", (512, 512), (128, 128, 128))
+mllm = LLavaMedMLLM(
+    device="cuda",
+    paper_preset=True,
+    prompt_template="USER: <image>\n{question}\nASSISTANT:",
+    hidden_state_layer=-2,      # use second-to-last layer
+    visual_pooling="mean",     # mean-pool visual tokens
+)
+out = mllm([pil_image], ["Where is the lesion?"])
+z = out["z_emb"]            # (B, L, 4096)
+z_proj = out["z_emb_proj"]  # (B, L, 256)
+z_pooled = out.get("z_emb_pooled")           # (B, 4096) if pooling != 'none'
+z_pooled_proj = out.get("z_emb_proj_pooled") # (B, 256) if pooling != 'none'
+```
+
 ## 🏃 Quick Start
 
 ### 1. Prepare Your Data
@@ -87,7 +175,7 @@ CSV format should include columns: `image_path`, `mask_path`, `question`, `answe
 
 **Single GPU Training:**
 ```bash
-python train_prs_med.py \
+python train.py \
     --data_root ./data \
     --batch_size 8 \
     --learning_rate 1e-4 \
@@ -151,7 +239,7 @@ prs_med_mmrs/
 ### Basic Training
 
 ```bash
-python train_prs_med.py \
+python train.py \
     --data_root /path/to/data \
     --batch_size 8 \
     --learning_rate 1e-4 \
@@ -183,7 +271,7 @@ python train_prs_med.py \
 For GPUs with limited memory, use gradient accumulation:
 
 ```bash
-python train_prs_med.py \
+python train.py \
     --data_root ./data \
     --batch_size 2 \
     --gradient_accumulation_steps 4 \
@@ -278,7 +366,7 @@ Train on multiple GPUs using distributed data parallel (DDP):
 
 ```bash
 # Using torchrun
-torchrun --nproc_per_node=4 train_prs_med.py \
+torchrun --nproc_per_node=4 train.py \
     --data_root ./data \
     --batch_size 8
 
