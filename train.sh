@@ -18,3 +18,5 @@ git checkout v3 # TODO: remove this
 uv run python -m train --data-dir /workspace/new_data --ckptt-dir /workspace/checkpoints
 
 
+# Evaluate the model
+uv run python -m evaluation --checkpoint /workspace/checkpoints/best_model_epoch_*.pth --data-root /workspace/new_data
