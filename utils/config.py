@@ -52,7 +52,6 @@ def get_config() -> PRSMedConfig:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--image-size", type=int, default=1024)
     parser.add_argument("--num-workers", type=int, default=2)
 
