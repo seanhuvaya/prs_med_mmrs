@@ -16,6 +16,7 @@ class PRSMedConfig:
     # Loss weights
     lambda_seg: float = 1.0
     lambda_txt: float = 0.5
+    gradient_accumulation_steps: int = 1
 
     # Training params
     batch_size: int = 8
@@ -47,6 +48,7 @@ def get_config() -> PRSMedConfig:
     # Loss weights
     parser.add_argument("--lambda-seg", type=float, default=1.0)
     parser.add_argument("--lambda-txt", type=float, default=0.5)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
 
     # Training params
     parser.add_argument("--batch-size", type=int, default=8)
