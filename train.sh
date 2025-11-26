@@ -18,3 +18,4 @@ git checkout v3 # TODO: remove this
 uv run python -m train --data-dir /workspace/new_data --ckptt-dir /workspace/checkpoints
 
 
+# TODO: add evaluation
