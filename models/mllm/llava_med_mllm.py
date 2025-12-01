@@ -331,7 +331,7 @@ class LLavaMedMLLM(nn.Module):
 
 if __name__ == "__main__":
     # Simple smoke test
-    img = Image.new("RGB", (512, 512), color=(128, 128, 128))
+    img = Image.new("RGB", (1024, 1024), color=(128, 128, 128))
     batch_images = [img, img]
     batch_questions = [
         "Where is the tumor located?",
