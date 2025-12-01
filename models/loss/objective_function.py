@@ -28,80 +28,57 @@ class DiceLoss(nn.Module):
 
 class PRSMedLoss(nn.Module):
     """
-    Fixed implementation: L_total = λ_seg * (BCE + Dice) + λ_txt * CE
+    L_total = λ_seg * (BCE + Dice) + λ_txt * lm_loss
+
+    NOTE:
+      - We no longer compute CE over tokens here.
+      - `lm_loss` is computed inside the LLaVA-Med MLLM (LLavaMedMLLM)
+        using proper masking of question tokens.
     """
-    def __init__(self, lambda_seg: float = 1.0, lambda_txt: float = 0.5, ignore_index: int = -100):
+    def __init__(self, lambda_seg: float = 1.0, lambda_txt: float = 0.5):
         super().__init__()
         self.lambda_seg = lambda_seg
         self.lambda_txt = lambda_txt
-        self.ignore_index = ignore_index
-        
+
         self.bce = nn.BCEWithLogitsLoss()
         self.dice = DiceLoss()
-        self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
     def forward(
         self,
         z_mask: torch.Tensor,
         y_mask: torch.Tensor,
-        z_txt: torch.Tensor,
-        y_txt: torch.Tensor,
+        lm_loss: torch.Tensor,
     ) -> dict:
         # ---- Segmentation loss ---- #
         loss_bce = self.bce(z_mask, y_mask)
         loss_dice = self.dice(z_mask, y_mask)
         loss_seg = loss_bce + loss_dice
 
-        # ---- Text reasoning loss ---- #
-        # FIX: Properly handle text logits and targets
-        # z_txt: (B, L, V) where B=batch, L=sequence length, V=vocab size
-        # y_txt: (B, L) where each element is a token ID
-        
-        B, L, V = z_txt.shape
-        B_target, L_target = y_txt.shape
-        
-        # Ensure batch sizes match
-        if B != B_target:
-            # Use the smaller batch size
-            min_batch = min(B, B_target)
-            z_txt = z_txt[:min_batch]
-            y_txt = y_txt[:min_batch]
-        
-        # Ensure sequence lengths match
-        if L != L_target:
-            # Use the minimum sequence length
-            min_seq = min(L, L_target)
-            z_txt = z_txt[:, :min_seq, :]
-            y_txt = y_txt[:, :min_seq]
-        
-        # Reshape for cross entropy: (B * L, V) and (B * L)
-        z_txt_flat = z_txt.reshape(-1, V)
-        y_txt_flat = y_txt.reshape(-1)
-        
-        loss_txt = self.ce(z_txt_flat, y_txt_flat)
+        # ---- Total loss ---- #
+        loss_total = self.lambda_seg * loss_seg
+        loss_txt_value = torch.tensor(0.0, device=z_mask.device)
 
-        # ---- Weighted sum ---- #
-        loss_total = self.lambda_seg * loss_seg + self.lambda_txt * loss_txt
+        if lm_loss is not None:
+            loss_total = loss_total + self.lambda_txt * lm_loss
+            loss_txt_value = lm_loss
 
         return {
             "loss_total": loss_total,
             "loss_seg": loss_seg.detach(),
-            "loss_txt": loss_txt.detach(),
+            "loss_txt": loss_txt_value.detach(),
         }
 
 
 if __name__ == "__main__":
 
-    B, L, V, H, W = 2, 595, 32064, 1024, 1024
+    B, H, W = 2, 1024, 1024
 
     z_mask = torch.randn(B, 1, H, W)
     y_mask = (torch.rand(B, 1, H, W) > 0.5).float()
-
-    z_txt = torch.randn(B, L, V)
-    y_txt = torch.randint(0, V, (B, L))
+    lm_loss = torch.tensor(4.0)
 
     criterion = PRSMedLoss(lambda_seg=1.0, lambda_txt=0.5)
-    out = criterion(z_mask, y_mask, z_txt, y_txt)
+    out = criterion(z_mask=z_mask, y_mask=y_mask, lm_loss=lm_loss)
 
     print(
         f"loss_total={out['loss_total']:.4f}, "
