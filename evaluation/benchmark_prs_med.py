@@ -1,322 +1,387 @@
-import os
+import torch
+from typing import List, Tuple
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import numpy as np
-from typing import List, Dict, Tuple
-from dotenv import load_dotenv
-from scipy.spatial.distance import directed_hausdorff
-from scipy.ndimage import binary_erosion
-
-load_dotenv()
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-def dice_coefficient(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e-6):
+def dice_coefficient(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 1e-6):
     """
-    Compute Dice coefficient per sample.
-    Returns per-sample Dice scores for proper aggregation across dataset.
+    Compute Dice coefficient per sample (binary masks).
+
+    This follows standard medical segmentation evaluation used in PRS-Med:
+    mDice is the mean Dice across samples. (Section 6, Evaluation Metric)
     """
-    # Resize predicted mask to match ground truth resolution
+    # Resize predicted mask to match ground truth resolution if needed
     if pred_mask.shape != true_mask.shape:
-        pred_mask = F.interpolate(pred_mask, size=true_mask.shape[2:], mode="bilinear", align_corners=False)
-    
-    pred_mask = torch.sigmoid(pred_mask)
-    pred_mask = (pred_mask > 0.5).float()
-    intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
-    dice = (2. * intersection + smooth) / (
-        pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) + smooth
-    )
-    return dice.cpu().numpy()  # Return per-sample scores
+        pred_mask = F.interpolate(
+            pred_mask,
+            size=true_mask.shape[2:],
+            mode="bilinear",
+            align_corners=False,
+        )
 
-
-def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth=1e-6):
-    """
-    Compute IoU score per sample.
-    Returns per-sample IoU scores for proper aggregation across dataset.
-    """
-    # Ensure both tensors have same spatial resolution
-    if pred_mask.shape != true_mask.shape:
-        pred_mask = F.interpolate(pred_mask, size=true_mask.shape[2:], mode="bilinear", align_corners=False)
-
-    pred_mask = torch.sigmoid(pred_mask)
-    pred_mask = (pred_mask > 0.5).float()
-    intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
-    union = (pred_mask + true_mask - pred_mask * true_mask).sum(dim=(1, 2, 3))
-    iou = (intersection + smooth) / (union + smooth)
-    return iou.cpu().numpy()  # Return per-sample scores
-
-
-def hausdorff_distance_per_sample(pred_mask: torch.Tensor, true_mask: torch.Tensor, percentile: float = 95.0):
-    """
-    Compute 95th percentile Hausdorff Distance (HD95) per sample.
-    
-    The Hausdorff distance measures the maximum distance between boundaries of 
-    predicted and ground truth masks. HD95 uses the 95th percentile to be more 
-    robust to outliers.
-    
-    Args:
-        pred_mask: (B, 1, H, W) predicted mask logits
-        true_mask: (B, 1, H, W) ground truth binary mask
-        percentile: Percentile for HD95 (default: 95.0)
-    
-    Returns:
-        Per-sample HD95 distances (numpy array)
-    """
-    # Resize if needed
-    if pred_mask.shape != true_mask.shape:
-        pred_mask = F.interpolate(pred_mask, size=true_mask.shape[2:], mode="bilinear", align_corners=False)
-    
-    # Convert to binary masks
+    # Convert logits to binary mask
     pred_mask = torch.sigmoid(pred_mask)
     pred_mask = (pred_mask > 0.5).float()
     true_mask = true_mask.float()
-    
-    batch_size = pred_mask.shape[0]
-    hd95_scores = []
-    
-    for i in range(batch_size):
-        pred_np = pred_mask[i, 0].cpu().numpy()
-        true_np = true_mask[i, 0].cpu().numpy()
-        
-        # Skip if either mask is empty
-        if pred_np.sum() == 0 or true_np.sum() == 0:
-            hd95_scores.append(float('inf'))
-            continue
-        
-        # Get boundary points using morphological operations
-        pred_boundary = pred_np.astype(bool) & ~binary_erosion(pred_np.astype(bool))
-        true_boundary = true_np.astype(bool) & ~binary_erosion(true_np.astype(bool))
-        
-        # Get coordinates of boundary points
-        pred_coords = np.column_stack(np.where(pred_boundary))
-        true_coords = np.column_stack(np.where(true_boundary))
-        
-        if len(pred_coords) == 0 or len(true_coords) == 0:
-            hd95_scores.append(float('inf'))
-            continue
-        
-        # For HD95, compute distances from each point to the other set
-        # and take the 95th percentile
-        distances_forward = []
-        for point in pred_coords:
-            dists = np.sqrt(((true_coords - point) ** 2).sum(axis=1))
-            distances_forward.append(dists.min())
-        
-        distances_backward = []
-        for point in true_coords:
-            dists = np.sqrt(((pred_coords - point) ** 2).sum(axis=1))
-            distances_backward.append(dists.min())
-        
-        all_distances = distances_forward + distances_backward
-        if len(all_distances) > 0:
-            hd95 = np.percentile(all_distances, percentile)
-        else:
-            hd95 = float('inf')
-        
-        hd95_scores.append(hd95)
-    
-    return np.array(hd95_scores)  # Return per-sample scores
+
+    intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
+    denom = pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
+    dice = (2.0 * intersection + smooth) / (denom + smooth)
+    return dice.cpu().numpy()  # (B,)
 
 
-def evaluate_position_reasoning_simple(pred_texts: List[str], gt_texts: List[str]) -> Dict[str, float]:
+def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 1e-6):
     """
-    Simple keyword-based position reasoning evaluation.
-    Extracts position keywords and checks for matches.
+    Compute IoU score per sample (binary masks).
+
+    PRS-Med uses mIoU as the second segmentation metric. (Section 6, Evaluation Metric)
     """
-    # Common position keywords
-    position_keywords = [
-        "top-left", "top left", "upper-left", "upper left",
-        "top-right", "top right", "upper-right", "upper right",
-        "bottom-left", "bottom left", "lower-left", "lower left",
-        "bottom-right", "bottom right", "lower-right", "lower right",
-        "center", "centre", "middle", "central",
-        "top", "upper", "bottom", "lower",
-        "left", "right",
-    ]
-    
-    def extract_position_keywords(text: str) -> set:
-        """Extract position keywords from text."""
-        text_lower = text.lower()
-        found = set()
-        for keyword in position_keywords:
-            if keyword in text_lower:
-                found.add(keyword)
-        return found
-    
-    exact_matches = 0
-    keyword_matches = 0
-    total = len(pred_texts)
-    
-    for pred, gt in zip(pred_texts, gt_texts):
-        # Exact match (case-insensitive)
-        if pred.lower().strip() == gt.lower().strip():
-            exact_matches += 1
-            keyword_matches += 1
-            continue
-        
-        # Keyword-based match
-        pred_keywords = extract_position_keywords(pred)
-        gt_keywords = extract_position_keywords(gt)
-        
-        if pred_keywords and gt_keywords:
-            # Check if there's overlap in keywords
-            if pred_keywords.intersection(gt_keywords):
-                keyword_matches += 1
-    
-    exact_acc = exact_matches / total if total > 0 else 0.0
-    keyword_acc = keyword_matches / total if total > 0 else 0.0
-    
-    return {
-        "exact_match_acc": exact_acc,
-        "keyword_match_acc": keyword_acc,
-    }
+    if pred_mask.shape != true_mask.shape:
+        pred_mask = F.interpolate(
+            pred_mask,
+            size=true_mask.shape[2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    pred_mask = torch.sigmoid(pred_mask)
+    pred_mask = (pred_mask > 0.5).float()
+    true_mask = true_mask.float()
+
+    intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
+    union = (pred_mask + true_mask - pred_mask * true_mask).sum(dim=(1, 2, 3))
+    iou = (intersection + smooth) / (union + smooth)
+    return iou.cpu().numpy()  # (B,)
 
 
-def evaluate_text_reasoning(pred_texts: List[str], gt_texts: List[str]) -> Dict[str, float]:
+# ------------------------- LLM Judge Utilities ------------------------- #
+
+class HFJudge:
     """
-    Position reasoning evaluation using keyword matching.
-    This matches standard evaluation practices in medical segmentation papers.
-    
-    Args:
-        pred_texts: List of predicted position descriptions
-        gt_texts: List of ground truth position descriptions
-    
+    Simple HuggingFace-based LLM judge.
+
+    This is used to implement the PRS-Med position reasoning benchmark:
+    - Two agents: Qwen 3 and Llama 3.1.
+    - Each agent is evaluated with three different chain-of-thought prompts that
+      must answer strictly "yes" or "no". (Section 5 + Appendix A.3)
+    """
+
+    def __init__(self, model_name: str, device: torch.device, max_new_tokens: int = 8):
+        self.model_name = model_name
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        )
+        self.model.to(device)
+        self.model.eval()
+
+    @torch.no_grad()
+    def __call__(self, prompt: str) -> str:
+        """
+        Run the judge on a single prompt and return the raw generated text.
+        """
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        output_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=False,
+        )
+        # Take only the newly generated tokens
+        gen_ids = output_ids[0, inputs["input_ids"].shape[1]:]
+        text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        return text.strip()
+
+
+def parse_yes_no(output_text: str) -> int:
+    """
+    Parse model output to a binary label:
+
+    - "yes" -> 1
+    - "no"  -> 0
+
+    PRS-Med requires the judge to answer in yes/no format. (Section 5, A.3)
+    """
+    text = output_text.strip().lower()
+
+    # Look at very beginning first
+    if text.startswith("yes"):
+        return 1
+    if text.startswith("no"):
+        return 0
+
+    # Fallback: search anywhere
+    if "yes" in text and "no" not in text:
+        return 1
+    if "no" in text and "yes" not in text:
+        return 0
+
+    # Conservative default (if unclear)
+    return 0
+
+
+def get_position_benchmark_prompts() -> List[str]:
+    """
+    Three chain-of-thought style prompt templates for the benchmark,
+    following Appendix A.3 of PRS-Med exactly in intent and wording.
+
+    Placeholders:
+        {question}, {groundtruth}, {prediction}
+    """
+    # 1) "As a medical image specialist ..."
+    prompt1 = (
+        "As a medical image specialist.\n"
+        "Instruction: Answer the question related to the position content, return only yes or no.\n"
+        "Given the following question and answer with the ground truth, is the position in the answer "
+        "similar or same with the ground truth and match with the question?\n\n"
+        "Question: {question}\n"
+        "Ground Truth: {groundtruth}\n"
+        "Prediction: {prediction}\n\n"
+        "Return yes if they are similar. Return no if they are different."
+    )
+
+    # 2) "As a doctor ..."
+    prompt2 = (
+        "As a doctor.\n"
+        "Instruction: Answer the question related to the position content, return only yes or no.\n"
+        "Check if the location information provided in the prediction aligns with the position mentioned "
+        "in the ground truth and is relevant to the question.\n\n"
+        "Question: {question}\n"
+        "Ground Truth: {groundtruth}\n"
+        "Prediction: {prediction}\n\n"
+        "Respond with Yes if the positions are similar. Respond with No if they are different."
+    )
+
+    # 3) "As you are a doctor and you are looking to the medical image ..."
+    prompt3 = (
+        "As you are a doctor and you are looking to the medical image.\n"
+        "Instruction: Answer the question related to the position content, return only yes or no.\n"
+        "Evaluate whether the predicted answer captures the same or similar positional context as the ground truth, "
+        "based on the provided question.\n\n"
+        "Question: {question}\n"
+        "Groundtruth: {groundtruth}\n"
+        "Prediction: {prediction}\n\n"
+        "Answer with \"Yes\" if the position is similar, otherwise \"No\"."
+    )
+
+    return [prompt1, prompt2, prompt3]
+
+
+def run_agent_position_benchmark(
+    judge: HFJudge,
+    questions: List[str],
+    gt_texts: List[str],
+    pred_texts: List[str],
+) -> Tuple[float, float, List[float]]:
+    """
+    Run the PRS-Med position reasoning benchmark for a single agent
+    (Qwen 3 or Llama 3.1).
+
+    For each agent:
+      - Use 3 different prompts (Appendix A.3).
+      - For each prompt, evaluate accuracy across all (Q, GT, Pred) triplets.
+      - Agent accuracy = mean of the 3 prompt accuracies.
+      - Agent std     = std dev over the 3 prompt accuracies.
+
     Returns:
-        Dictionary with evaluation metrics
+        agent_acc (float), agent_std (float), per_prompt_acc (list of 3 floats)
     """
-    # Use simple keyword-based evaluation (standard in papers)
-    return evaluate_position_reasoning_simple(pred_texts, gt_texts)
+    templates = get_position_benchmark_prompts()
+    assert len(templates) == 3
+
+    per_prompt_acc = []
+
+    for template in templates:
+        correct = 0
+        total = len(pred_texts)
+
+        for q, gt, pred in zip(questions, gt_texts, pred_texts):
+            prompt = template.format(
+                question=q,
+                groundtruth=gt,
+                prediction=pred,
+            )
+            output = judge(prompt)
+            label = parse_yes_no(output)
+            correct += label
+
+        acc = correct / total if total > 0 else 0.0
+        per_prompt_acc.append(acc)
+
+    per_prompt_acc = np.array(per_prompt_acc, dtype=np.float32)
+    agent_acc = float(per_prompt_acc.mean())
+    agent_std = float(per_prompt_acc.std(ddof=0))
+
+    return agent_acc, agent_std, per_prompt_acc.tolist()
 
 
+# ------------------------- Core Evaluation ------------------------- #
 
-def evaluate_prs_med(model, data_loader, device):
+def evaluate_prs_med(
+    model,
+    data_loader,
+    device: torch.device,
+    qwen_model_name: str,
+    llama_model_name: str,
+    judge_device: torch.device = None,
+):
     """
-    Evaluation of PRS-Med model following standard medical segmentation practices.
-    Metrics are computed per-sample and aggregated across the entire dataset.
-    
-    Args:
-        model: PRS-Med model
-        data_loader: DataLoader with test data
-        device: Device to run evaluation on
-    
-    Returns:
-        Dictionary with all evaluation metrics
+    Evaluation of PRS-Med model, following the paper:
+
+    - Segmentation: mDice, mIoU. (Section 6, Evaluation Metric)
+    - Position reasoning: accuracy via ensemble of agents Qwen 3 & Llama 3.1.
+      Each agent uses three chain-of-thought prompts and returns yes/no. (Section 5, Appendix A.3)
     """
     model.to(device)
     model.eval()
-    
-    # Collect per-sample scores across entire dataset
+
+    if judge_device is None:
+        judge_device = device
+
+    # Collect per-sample segmentation scores and text triplets
     all_dice_scores = []
     all_iou_scores = []
-    all_hd95_scores = []
-    pred_texts, gt_texts = [], []
+    questions_all: List[str] = []
+    gt_texts_all: List[str] = []
+    pred_texts_all: List[str] = []
 
     with torch.no_grad():
-        for batch in tqdm(data_loader, desc="Evaluating"):
-            # Handle different data loader formats
+        for batch in tqdm(data_loader, desc="Evaluating PRS-Med"):
+            # Handle different dataloader formats
             if isinstance(batch, dict):
-                images = batch['image'].to(device)
-                gt_masks = batch['mask'].to(device)
-                questions = batch['question']
-                gt_answers = batch['answer']
+                images = batch["image"].to(device)
+                gt_masks = batch["mask"].to(device)
+                questions = batch["question"]
+                gt_answers = batch["answer"]
             else:
-                # Legacy format: (images, questions, gt_masks, gt_tokens, gt_answers)
+                # Legacy format: (images, questions, gt_masks, _, gt_answers)
                 images, questions, gt_masks, _, gt_answers = batch
                 images = images.to(device)
                 gt_masks = gt_masks.to(device)
-            
+
+            # Forward pass
             outputs = model(images, questions)
 
-            # Segmentation metrics - compute per-sample
+            # Segmentation metrics
             dice_per_sample = dice_coefficient(outputs["z_mask"], gt_masks)
             iou_per_sample = iou_score(outputs["z_mask"], gt_masks)
-            hd95_per_sample = hausdorff_distance_per_sample(outputs["z_mask"], gt_masks)
-            
+
             all_dice_scores.extend(dice_per_sample)
             all_iou_scores.extend(iou_per_sample)
-            all_hd95_scores.extend(hd95_per_sample)
 
-            # Convert token predictions back to text
+            # Decode predicted text from logits (teacher-forced output)
+            # This uses the same tokenization as in training (Eq. 7 in the paper).
+            mllm_model = model.module if hasattr(model, "module") else model
             pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
-            # Handle both regular and DDP-wrapped models
-            mllm_model = model.module if hasattr(model, 'module') else model
-            pred_text_batch = mllm_model.mllm.processor.batch_decode(pred_ids, skip_special_tokens=True)
-            pred_texts.extend(pred_text_batch)
-            gt_texts.extend(gt_answers)
+            pred_text_batch = mllm_model.mllm.processor.batch_decode(
+                pred_ids,
+                skip_special_tokens=True,
+            )
 
-    # Aggregate metrics across all samples (standard practice)
-    all_dice_scores = np.array(all_dice_scores)
-    all_iou_scores = np.array(all_iou_scores)
-    all_hd95_scores = np.array(all_hd95_scores)
-    
-    # Compute mean Dice and IoU
-    mdice = np.mean(all_dice_scores)
-    miou = np.mean(all_iou_scores)
-    
-    # Compute mean HD95, excluding inf values (standard practice)
-    valid_hd95 = all_hd95_scores[all_hd95_scores != float('inf')]
-    if len(valid_hd95) > 0:
-        mhd95 = np.mean(valid_hd95)
-    else:
-        mhd95 = float('inf')
-    
-    print(f"\n{'='*60}")
-    print(f"Segmentation Metrics (computed per-sample, aggregated across dataset):")
-    print(f"  mDice:  {mdice:.4f}")
-    print(f"  mIoU:   {miou:.4f}")
-    print(f"  mHD95:  {mhd95:.2f}" if mhd95 != float('inf') else f"  mHD95:  inf")
-    print(f"{'='*60}")
+            questions_all.extend(list(questions))
+            gt_texts_all.extend(list(gt_answers))
+            pred_texts_all.extend(pred_text_batch)
 
-    # Position reasoning metrics
-    text_metrics = evaluate_text_reasoning(pred_texts, gt_texts)
-    
-    print(f"\nPosition Reasoning Metrics:")
-    print(f"  Exact Match Accuracy:  {text_metrics.get('exact_match_acc', 0):.4f}")
-    print(f"  Keyword Match Accuracy: {text_metrics.get('keyword_match_acc', 0):.4f}")
-    print(f"{'='*60}\n")
+    # Aggregate segmentation metrics
+    all_dice_scores = np.array(all_dice_scores, dtype=np.float32)
+    all_iou_scores = np.array(all_iou_scores, dtype=np.float32)
 
-    return {
-        "mDice": float(mdice),
-        "mIoU": float(miou),
-        "mHD95": float(mhd95) if mhd95 != float('inf') else float('inf'),
-        **text_metrics
+    mDice = float(all_dice_scores.mean()) if all_dice_scores.size > 0 else 0.0
+    mIoU = float(all_iou_scores.mean()) if all_iou_scores.size > 0 else 0.0
+
+    print("\n" + "=" * 60)
+    print("Segmentation Metrics (PRS-Med paper)")
+    print("- Uses mDice and mIoU as in Section 6.")
+    print(f"  mDice: {mDice:.4f}")
+    print(f"  mIoU:  {mIoU:.4f}")
+    print("=" * 60 + "\n")
+
+    # ----------------- Position Reasoning Benchmark ----------------- #
+    # Qwen 3 agent
+    print("Loading Qwen 3 judge model from HuggingFace:")
+    print(f"  {qwen_model_name}")
+    qwen_judge = HFJudge(qwen_model_name, judge_device)
+
+    qwen_acc, qwen_std, qwen_per_prompt = run_agent_position_benchmark(
+        qwen_judge,
+        questions_all,
+        gt_texts_all,
+        pred_texts_all,
+    )
+
+    # Llama 3.1 agent
+    print("\nLoading Llama 3.1 judge model from HuggingFace:")
+    print(f"  {llama_model_name}")
+    llama_judge = HFJudge(llama_model_name, judge_device)
+
+    llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
+        llama_judge,
+        questions_all,
+        gt_texts_all,
+        pred_texts_all,
+    )
+
+    # Final result: mean of agents' accuracies (Section 5)
+    final_reasoning_acc = (qwen_acc + llama_acc) / 2.0
+
+    print("\n" + "=" * 60)
+    print("Position Reasoning Benchmark (PRS-Med)")
+    print("- Each agent uses 3 prompts, we report mean ± std over prompts.")
+    print(f"  Qwen 3 Benchmark:   {qwen_acc:.3f} ({qwen_std:.3f})")
+    print(f"  Llama 3.1 Benchmark:{llama_acc:.3f} ({llama_std:.3f})")
+    print(f"  Final Result:       {final_reasoning_acc:.3f}")
+    print("=" * 60 + "\n")
+
+    metrics = {
+        "mDice": mDice,
+        "mIoU": mIoU,
+        "qwen_acc": qwen_acc,
+        "qwen_std": qwen_std,
+        "llama_acc": llama_acc,
+        "llama_std": llama_std,
+        "final_reasoning_acc": final_reasoning_acc,
+        "qwen_per_prompt_acc": qwen_per_prompt,   # 3 values (for reproducibility)
+        "llama_per_prompt_acc": llama_per_prompt, # 3 values
     }
 
+    return metrics
 
-def load_model_from_checkpoint(checkpoint_path: str, args, device):
+
+# ------------------------- Model Loading & CLI ------------------------- #
+
+def load_model_from_checkpoint(checkpoint_path: str, args, device: torch.device):
     """
     Load PRS-Med model from checkpoint.
-    
-    Args:
-        checkpoint_path: Path to checkpoint file (.pth)
-        args: Arguments object with model configuration
-        device: Device to load model on
-    
-    Returns:
-        Loaded model
+
+    Assumes PRSMedModel definition matches the training code (same as the paper).
     """
     from train_prs_med import PRSMedModel
-    
+
     print(f"Loading model from checkpoint: {checkpoint_path}")
-    
+
     # Initialize model
     model = PRSMedModel(args, device)
-    
+
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Handle different checkpoint formats
-    if 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
+
+    if "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
         print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
     else:
         state_dict = checkpoint
         print("Loaded checkpoint (no epoch info found)")
-    
-    # Load state dict
+
     model.load_state_dict(state_dict, strict=False)
-    
     print("✓ Model loaded successfully")
     return model
 
@@ -326,118 +391,200 @@ def main():
     import json
     from pathlib import Path
     from data.dataset import PRSMedDataset
-    
-    parser = argparse.ArgumentParser(description='Evaluate PRS-Med Model')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                       help='Path to model checkpoint (.pth file)')
-    parser.add_argument('--data_root', type=str, required=True,
-                       help='Root directory of the dataset')
-    parser.add_argument('--split', type=str, default='test',
-                       choices=['train', 'val', 'test'],
-                       help='Dataset split to evaluate on (default: test)')
-    parser.add_argument('--batch_size', type=int, default=8,
-                       help='Batch size for evaluation (default: 8)')
-    parser.add_argument('--num_workers', type=int, default=2,
-                       help='Number of data loader workers (default: 2)')
-    parser.add_argument('--image_size', type=int, default=1024,
-                       help='Image size (default: 1024)')
-    parser.add_argument('--tinysam_checkpoint', type=str, default='weights/tinysam_42.3.pth',
-                       help='Path to TinySAM checkpoint (default: weights/tinysam_42.3.pth)')
-    parser.add_argument('--lora_rank', type=int, default=16,
-                       help='LoRA rank (default: 16)')
-    parser.add_argument('--lora_alpha', type=int, default=16,
-                       help='LoRA alpha (default: 16)')
-    parser.add_argument('--lora_dropout', type=float, default=0.05,
-                       help='LoRA dropout (default: 0.05)')
-    parser.add_argument('--output_dir', type=str, default=None,
-                       help='Directory to save evaluation results (optional)')
-    parser.add_argument('--specific_dataset', type=str, default=None,
-                       help='Evaluate on specific dataset only (optional)')
-    
+
+    parser = argparse.ArgumentParser(description="Evaluate PRS-Med Model (paper-faithful)")
+
+    # Core model / data args
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to model checkpoint (.pth file)",
+    )
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        required=True,
+        help="Root directory of the dataset",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["train", "val", "test"],
+        help="Dataset split to evaluate on (default: test)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for evaluation (default: 8)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=2,
+        help="Number of data loader workers (default: 2)",
+    )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=1024,
+        help="Image size (default: 1024)",
+    )
+    parser.add_argument(
+        "--tinysam_checkpoint",
+        type=str,
+        default="weights/tinysam_42.3.pth",
+        help="Path to TinySAM checkpoint (default: weights/tinysam_42.3.pth)",
+    )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=16,
+        help="LoRA rank (default: 16)",
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=16,
+        help="LoRA alpha (default: 16)",
+    )
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.05,
+        help="LoRA dropout (default: 0.05)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Directory to save evaluation results (optional)",
+    )
+    parser.add_argument(
+        "--specific_dataset",
+        type=str,
+        default=None,
+        help="Evaluate on specific dataset only (optional)",
+    )
+
+    # LLM judges (Qwen 3 and Llama 3.1, from HuggingFace)
+    parser.add_argument(
+        "--qwen_model_name",
+        type=str,
+        default="Qwen/Qwen3-8B",
+        help="HuggingFace model name for Qwen 3 judge (default: Qwen/Qwen3-8B)",
+    )
+    parser.add_argument(
+        "--llama_model_name",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="HuggingFace model name for Llama 3.1 judge (default: meta-llama/Llama-3.1-8B-Instruct)",
+    )
+    parser.add_argument(
+        "--judge_device",
+        type=str,
+        default=None,
+        help="Device for judge models (e.g., 'cuda', 'cuda:1', 'cpu'). "
+             "Defaults to same as main device if not set.",
+    )
+
     args = parser.parse_args()
-    
-    # Set device
+
+    # Set device for PRS-Med
     if torch.cuda.is_available():
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         print(f"Using device: CUDA ({torch.cuda.get_device_name(0)})")
     elif torch.backends.mps.is_available():
-        device = torch.device('mps')
+        device = torch.device("mps")
         print("Using device: MPS")
     else:
-        device = torch.device('cpu')
+        device = torch.device("cpu")
         print("Using device: CPU")
-    
-    # Load model
+
+    # Judge device
+    if args.judge_device is not None:
+        judge_device = torch.device(args.judge_device)
+    else:
+        judge_device = device
+
+    # Load PRS-Med model
     model = load_model_from_checkpoint(args.checkpoint, args, device)
     model.eval()
-    
+
     # Load dataset
     print(f"\nLoading {args.split} dataset from {args.data_root}...")
-    test_dataset = PRSMedDataset(
+    dataset = PRSMedDataset(
         split=args.split,
         data_root=args.data_root,
-        specific_dataset=args.specific_dataset
+        specific_dataset=args.specific_dataset,
     )
-    
-    print(f"Dataset size: {len(test_dataset)} samples")
+    print(f"Dataset size: {len(dataset)} samples")
     if args.specific_dataset:
         print(f"Evaluating on dataset: {args.specific_dataset}")
-    
-    # Create data loader
-    test_loader = DataLoader(
-        test_dataset,
+
+    # DataLoader
+    data_loader = DataLoader(
+        dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True if device.type == 'cuda' else False
+        pin_memory=True if device.type == "cuda" else False,
     )
-    
-    # Run evaluation
-    print(f"\n{'='*60}")
-    print(f"Starting evaluation on {args.split} split")
-    print(f"{'='*60}\n")
-    
-    metrics = evaluate_prs_med(model, test_loader, device)
-    
-    # Save results if output directory specified
+
+    # Run evaluation (paper-faithful)
+    print("\n" + "=" * 60)
+    print(f"Starting evaluation on {args.split} split (PRS-Med protocol)")
+    print("=" * 60 + "\n")
+
+    metrics = evaluate_prs_med(
+        model,
+        data_loader,
+        device=device,
+        qwen_model_name=args.qwen_model_name,
+        llama_model_name=args.llama_model_name,
+        judge_device=judge_device,
+    )
+
+    # Save results if requested
     if args.output_dir:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create results filename
+
         checkpoint_name = Path(args.checkpoint).stem
         results_file = output_dir / f"results_{args.split}_{checkpoint_name}.json"
-        
-        # Add metadata
+
         results = {
-            'checkpoint': args.checkpoint,
-            'split': args.split,
-            'dataset_size': len(test_dataset),
-            'specific_dataset': args.specific_dataset,
-            'metrics': metrics
+            "checkpoint": args.checkpoint,
+            "split": args.split,
+            "dataset_size": len(dataset),
+            "specific_dataset": args.specific_dataset,
+            "metrics": metrics,
+            "qwen_model_name": args.qwen_model_name,
+            "llama_model_name": args.llama_model_name,
         }
-        
-        # Save JSON
-        with open(results_file, 'w') as f:
+
+        with open(results_file, "w") as f:
             json.dump(results, f, indent=2)
-        
+
         print(f"\n✓ Results saved to: {results_file}")
-    
-    # Print summary
-    print(f"\n{'='*60}")
-    print("Evaluation Summary:")
-    print(f"{'='*60}")
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("Evaluation Summary (PRS-Med)")
+    print("=" * 60)
     print(f"Checkpoint: {args.checkpoint}")
-    print(f"Split: {args.split}")
-    print(f"Dataset size: {len(test_dataset)}")
-    print(f"\nSegmentation Metrics:")
-    print(f"  mDice:  {metrics['mDice']:.4f}")
-    print(f"  mIoU:   {metrics['mIoU']:.4f}")
-    print(f"  mHD95:  {metrics['mHD95']:.2f}" if metrics['mHD95'] != float('inf') else f"  mHD95:  inf")
-    print(f"\nPosition Reasoning Metrics:")
-    print(f"  Exact Match Accuracy:  {metrics.get('exact_match_acc', 0):.4f}")
-    print(f"  Keyword Match Accuracy: {metrics.get('keyword_match_acc', 0):.4f}")
-    print(f"{'='*60}\n")
+    print(f"Split:      {args.split}")
+    print(f"Dataset size: {len(dataset)}")
+    print("\nSegmentation Metrics:")
+    print(f"  mDice: {metrics['mDice']:.4f}")
+    print(f"  mIoU:  {metrics['mIoU']:.4f}")
+    print("\nPosition Reasoning Benchmark:")
+    print(f"  Qwen 3:     {metrics['qwen_acc']:.3f} ({metrics['qwen_std']:.3f})")
+    print(f"  Llama 3.1:  {metrics['llama_acc']:.3f} ({metrics['llama_std']:.3f})")
+    print(f"  Final Acc:  {metrics['final_reasoning_acc']:.3f}")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
