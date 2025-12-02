@@ -1,20 +1,21 @@
-import torch
-from typing import List, Tuple
-
-import numpy as np
+import os
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import numpy as np
+from typing import List, Dict, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
+# ======================= Segmentation Metrics ======================= #
 
 def dice_coefficient(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 1e-6):
     """
     Compute Dice coefficient per sample (binary masks).
 
-    This follows standard medical segmentation evaluation used in PRS-Med:
-    mDice is the mean Dice across samples. (Section 6, Evaluation Metric)
+    PRS-Med uses mDice as a primary segmentation metric.
+    We compute per-sample Dice and then average across the dataset.
     """
     # Resize predicted mask to match ground truth resolution if needed
     if pred_mask.shape != true_mask.shape:
@@ -40,7 +41,8 @@ def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 
     """
     Compute IoU score per sample (binary masks).
 
-    PRS-Med uses mIoU as the second segmentation metric. (Section 6, Evaluation Metric)
+    PRS-Med uses mIoU as the other segmentation metric.
+    We compute per-sample IoU and then average across the dataset.
     """
     if pred_mask.shape != true_mask.shape:
         pred_mask = F.interpolate(
@@ -60,16 +62,15 @@ def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 
     return iou.cpu().numpy()  # (B,)
 
 
-# ------------------------- LLM Judge Utilities ------------------------- #
+# ======================= LLM Judge Utilities ======================= #
 
 class HFJudge:
     """
     Simple HuggingFace-based LLM judge.
 
-    This is used to implement the PRS-Med position reasoning benchmark:
+    Used to implement the PRS-Med position reasoning benchmark:
     - Two agents: Qwen 3 and Llama 3.1.
-    - Each agent is evaluated with three different chain-of-thought prompts that
-      must answer strictly "yes" or "no". (Section 5 + Appendix A.3)
+    - Each agent evaluated with 3 chain-of-thought prompts that must answer strictly 'yes' or 'no'.
     """
 
     def __init__(self, model_name: str, device: torch.device, max_new_tokens: int = 8):
@@ -78,6 +79,10 @@ class HFJudge:
         self.max_new_tokens = max_new_tokens
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Some chat models require padding side to be left for generation
+        if not self.tokenizer.pad_token:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
@@ -90,7 +95,7 @@ class HFJudge:
         """
         Run the judge on a single prompt and return the raw generated text.
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
         output_ids = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
@@ -109,7 +114,7 @@ def parse_yes_no(output_text: str) -> int:
     - "yes" -> 1
     - "no"  -> 0
 
-    PRS-Med requires the judge to answer in yes/no format. (Section 5, A.3)
+    PRS-Med requires the judge to answer in yes/no format.
     """
     text = output_text.strip().lower()
 
@@ -125,14 +130,14 @@ def parse_yes_no(output_text: str) -> int:
     if "no" in text and "yes" not in text:
         return 0
 
-    # Conservative default (if unclear)
+    # Conservative default if unclear
     return 0
 
 
 def get_position_benchmark_prompts() -> List[str]:
     """
     Three chain-of-thought style prompt templates for the benchmark,
-    following Appendix A.3 of PRS-Med exactly in intent and wording.
+    following Appendix A.3 of PRS-Med as closely as possible.
 
     Placeholders:
         {question}, {groundtruth}, {prediction}
@@ -224,7 +229,7 @@ def run_agent_position_benchmark(
     return agent_acc, agent_std, per_prompt_acc.tolist()
 
 
-# ------------------------- Core Evaluation ------------------------- #
+# ======================= Core Evaluation ======================= #
 
 def evaluate_prs_med(
     model,
@@ -237,9 +242,9 @@ def evaluate_prs_med(
     """
     Evaluation of PRS-Med model, following the paper:
 
-    - Segmentation: mDice, mIoU. (Section 6, Evaluation Metric)
+    - Segmentation: mDice, mIoU.
     - Position reasoning: accuracy via ensemble of agents Qwen 3 & Llama 3.1.
-      Each agent uses three chain-of-thought prompts and returns yes/no. (Section 5, Appendix A.3)
+      Each agent uses three chain-of-thought prompts and returns yes/no.
     """
     model.to(device)
     model.eval()
@@ -268,8 +273,8 @@ def evaluate_prs_med(
                 images = images.to(device)
                 gt_masks = gt_masks.to(device)
 
-            # Forward pass
-            outputs = model(images, questions)
+            # Forward pass (model expects: images, questions, answers)
+            outputs = model(images, questions, gt_answers)
 
             # Segmentation metrics
             dice_per_sample = dice_coefficient(outputs["z_mask"], gt_masks)
@@ -279,7 +284,7 @@ def evaluate_prs_med(
             all_iou_scores.extend(iou_per_sample)
 
             # Decode predicted text from logits (teacher-forced output)
-            # This uses the same tokenization as in training (Eq. 7 in the paper).
+            # This uses the same tokenization as in training.
             mllm_model = model.module if hasattr(model, "module") else model
             pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
             pred_text_batch = mllm_model.mllm.processor.batch_decode(
@@ -300,7 +305,6 @@ def evaluate_prs_med(
 
     print("\n" + "=" * 60)
     print("Segmentation Metrics (PRS-Med paper)")
-    print("- Uses mDice and mIoU as in Section 6.")
     print(f"  mDice: {mDice:.4f}")
     print(f"  mIoU:  {mIoU:.4f}")
     print("=" * 60 + "\n")
@@ -326,19 +330,19 @@ def evaluate_prs_med(
     llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
         llama_judge,
         questions_all,
-        gt_texts_all,
-        pred_texts_all,
+        pred_texts_all=pred_texts_all,
+        gt_texts=gt_texts_all,
     )
 
-    # Final result: mean of agents' accuracies (Section 5)
+    # Final result: mean of agents' accuracies
     final_reasoning_acc = (qwen_acc + llama_acc) / 2.0
 
     print("\n" + "=" * 60)
     print("Position Reasoning Benchmark (PRS-Med)")
-    print("- Each agent uses 3 prompts, we report mean ± std over prompts.")
-    print(f"  Qwen 3 Benchmark:   {qwen_acc:.3f} ({qwen_std:.3f})")
-    print(f"  Llama 3.1 Benchmark:{llama_acc:.3f} ({llama_std:.3f})")
-    print(f"  Final Result:       {final_reasoning_acc:.3f}")
+    print("Each agent: mean ± std over 3 prompt variants")
+    print(f"  Qwen 3:     {qwen_acc:.3f} ({qwen_std:.3f})")
+    print(f"  Llama 3.1:  {llama_acc:.3f} ({llama_std:.3f})")
+    print(f"  Final Acc:  {final_reasoning_acc:.3f}")
     print("=" * 60 + "\n")
 
     metrics = {
@@ -349,14 +353,14 @@ def evaluate_prs_med(
         "llama_acc": llama_acc,
         "llama_std": llama_std,
         "final_reasoning_acc": final_reasoning_acc,
-        "qwen_per_prompt_acc": qwen_per_prompt,   # 3 values (for reproducibility)
+        "qwen_per_prompt_acc": qwen_per_prompt,   # 3 values
         "llama_per_prompt_acc": llama_per_prompt, # 3 values
     }
 
     return metrics
 
 
-# ------------------------- Model Loading & CLI ------------------------- #
+# ======================= Model Loading & CLI ======================= #
 
 def load_model_from_checkpoint(checkpoint_path: str, args, device: torch.device):
     """
@@ -533,7 +537,7 @@ def main():
         pin_memory=True if device.type == "cuda" else False,
     )
 
-    # Run evaluation (paper-faithful)
+    # Run evaluation
     print("\n" + "=" * 60)
     print(f"Starting evaluation on {args.split} split (PRS-Med protocol)")
     print("=" * 60 + "\n")
@@ -574,8 +578,8 @@ def main():
     print("\n" + "=" * 60)
     print("Evaluation Summary (PRS-Med)")
     print("=" * 60)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Split:      {args.split}")
+    print(f"Checkpoint:   {args.checkpoint}")
+    print(f"Split:        {args.split}")
     print(f"Dataset size: {len(dataset)}")
     print("\nSegmentation Metrics:")
     print(f"  mDice: {metrics['mDice']:.4f}")
