@@ -1,5 +1,17 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
+## Run Train script
+```bash
+bash setup_and_train.sh \
+  YOUR_AWS_ACCESS_KEY_ID \
+  YOUR_AWS_SECRET_ACCESS_KEY \
+  us-east-1 \
+  prs-med \
+  s3://prs-med-dataset/Data/ \
+  /workspace/data \
+  /workspace/checkpoints \
+  s3://prs-med-dataset/Checkpoints/
 
+```
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.9+-orange.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -400,3 +412,5 @@ For questions or issues, please open an issue on GitHub.
 ---
 
 **Ready to train your PRS-Med model!** 🎉
+
+
