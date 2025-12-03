@@ -5,3 +5,4 @@ data/.DS_Store
 .env
 checkpoints/
 **/__pycache__/
+weights/sam2.1_hiera_tiny.pt

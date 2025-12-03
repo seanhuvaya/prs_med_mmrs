@@ -20,6 +20,8 @@ Arguments:
   6) LOCAL_DATA_DIR            (e.g. /workspace/data)
   7) CHECKPOINTS_DIR           (e.g. /workspace/checkpoints)
   8) S3_CHECKPOINTS_URI        (e.g. s3://prs-med-dataset/Checkpoints)
+  9) VISION_ENCODER_TYPE       (e.g. sam_med2d or tinysam)
+  10) VISION_ENCODER_CHECKPOINT (e.g. weights/sam2.1_hiera_tiny.pt or weights/tinysam_42.3.pth)
 EOF
     exit 1
 }
@@ -50,6 +52,8 @@ AWS_S3_BUCKET_DATA_URI="$5"
 LOCAL_DATA_URI="$6"
 CHECKPOINTS_DIR="$7"
 AWS_S3_BUCKET_CHECKPOINTS_URI="$8"
+VISION_ENCODER_TYPE="$9"
+VISION_ENCODER_CHECKPOINT="$10"
 
 REPO_URL="https://github.com/seanhuvaya/prs_med_mmrs.git"
 REPO_DIR="/workspace/prs_med_mmrs"
@@ -120,10 +124,15 @@ ok "Dependencies synced."
 log "Training model..."
 mkdir -p "$CHECKPOINTS_DIR"
 
+echo "${BLUE}Downloading SAM2.1 Hiera Tiny checkpoint...${NC}"
+wget -O "weights/sam2.1_hiera_tiny.pt" "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt" 
+
+
 uv run python -m train_prs_med \
-    --batch_size 8 \
-    --data_root "$LOCAL_DATA_URI" \
-    --checkpoint_dir "$CHECKPOINTS_DIR"
+  --data_root "$LOCAL_DATA_URI" \
+  --vision_encoder_type "$VISION_ENCODER_TYPE" \
+  --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
+  --checkpoint_dir "$CHECKPOINTS_DIR" \
 
 ok "Training finished."
 

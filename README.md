@@ -6,10 +6,12 @@ bash setup_and_train.sh \
   YOUR_AWS_SECRET_ACCESS_KEY \
   us-east-1 \
   prs-med \
-  s3://prs-med-dataset/Data/ \
+  s3://prs-med-dataset/new_data \
   /workspace/data \
   /workspace/checkpoints \
-  s3://prs-med-dataset/Checkpoints/
+  s3://prs-med-dataset/checkpoints \
+  sam_med2d \
+  weights/sam2.1_hiera_tiny.pt
 
 ```
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
