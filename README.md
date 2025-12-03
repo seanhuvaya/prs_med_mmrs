@@ -1,7 +1,8 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
 ## Run Train script
 ```bash
-bash setup_and_train.sh \
+curl -fsSL https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
+  | bash -s -- \
   YOUR_AWS_ACCESS_KEY_ID \
   YOUR_AWS_SECRET_ACCESS_KEY \
   us-east-1 \
