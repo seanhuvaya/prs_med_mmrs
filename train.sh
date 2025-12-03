@@ -14,14 +14,14 @@ Usage: $0 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION AWS_PROFILE S3_DATA
 Arguments:
   1) AWS_ACCESS_KEY_ID
   2) AWS_SECRET_ACCESS_KEY
-  3) AWS_REGION                (e.g. us-east-1)
-  4) AWS_PROFILE               (e.g. prs-med)
-  5) S3_DATA_URI               (e.g. s3://prs-med-dataset/Data/)
-  6) LOCAL_DATA_DIR            (e.g. /workspace/data)
-  7) CHECKPOINTS_DIR           (e.g. /workspace/checkpoints)
-  8) S3_CHECKPOINTS_URI        (e.g. s3://prs-med-dataset/Checkpoints)
-  9) VISION_ENCODER_TYPE       (e.g. sam_med2d or tinysam)
-  10) VISION_ENCODER_CHECKPOINT (e.g. weights/sam2.1_hiera_tiny.pt or weights/tinysam_42.3.pth)
+  3) AWS_REGION                 (e.g. us-east-1)
+  4) AWS_PROFILE                (e.g. prs-med)
+  5) S3_DATA_URI                (e.g. s3://prs-med-dataset/Data/)
+  6) LOCAL_DATA_DIR             (e.g. /workspace/data)
+  7) CHECKPOINTS_DIR            (e.g. /workspace/checkpoints)
+  8) S3_CHECKPOINTS_URI         (e.g. s3://prs-med-dataset/Checkpoints)
+  9) VISION_ENCODER_TYPE        (e.g. sam_med2d or tinysam)
+ 10) VISION_ENCODER_CHECKPOINT  (e.g. weights/sam2.1_hiera_tiny.pt or weights/tinysam_42.3.pth)
 EOF
     exit 1
 }
@@ -53,10 +53,22 @@ LOCAL_DATA_URI="$6"
 CHECKPOINTS_DIR="$7"
 AWS_S3_BUCKET_CHECKPOINTS_URI="$8"
 VISION_ENCODER_TYPE="$9"
-VISION_ENCODER_CHECKPOINT="$10"
+VISION_ENCODER_CHECKPOINT="${10}"
 
 REPO_URL="https://github.com/seanhuvaya/prs_med_mmrs.git"
 REPO_DIR="/workspace/prs_med_mmrs"
+
+# ---- Debug (no secrets) ----
+log "=== DEBUG: Script Arguments (non-secret) ==="
+echo "AWS_REGION:                 $AWS_DEFAULT_REGION"
+echo "AWS_PROFILE:                $AWS_PROFILE"
+echo "S3_DATA_URI:                $AWS_S3_BUCKET_DATA_URI"
+echo "LOCAL_DATA_DIR:             $LOCAL_DATA_URI"
+echo "CHECKPOINTS_DIR:            $CHECKPOINTS_DIR"
+echo "S3_CHECKPOINTS_URI:         $AWS_S3_BUCKET_CHECKPOINTS_URI"
+echo "VISION_ENCODER_TYPE:        $VISION_ENCODER_TYPE"
+echo "VISION_ENCODER_CHECKPOINT:  $VISION_ENCODER_CHECKPOINT"
+log "==========================================="
 
 # ---- Basic tool checks ----
 for cmd in curl unzip git; do
@@ -74,7 +86,9 @@ fi
 # ---- Install AWS CLI if needed ----
 if ! command -v aws >/dev/null 2>&1; then
     log "AWS CLI not found. Installing AWS CLI v2..."
-    curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    curl -fsSL --retry 5 --retry-delay 2 \
+        "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+        -o "awscliv2.zip"
     unzip -q awscliv2.zip
     # Usually running as root in containers; no sudo needed
     ./aws/install
@@ -140,10 +154,10 @@ log "Training model..."
 mkdir -p "$CHECKPOINTS_DIR"
 
 uv run python -m train_prs_med \
-  --data_root "$LOCAL_DATA_URI" \
-  --vision_encoder_type "$VISION_ENCODER_TYPE" \
-  --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
-  --checkpoint_dir "$CHECKPOINTS_DIR"
+    --data_root "$LOCAL_DATA_URI" \
+    --vision_encoder_type "$VISION_ENCODER_TYPE" \
+    --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
+    --checkpoint_dir "$CHECKPOINTS_DIR"
 
 ok "Training finished."
 
