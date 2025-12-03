@@ -437,10 +437,23 @@ def main():
         help="Image size (default: 1024)",
     )
     parser.add_argument(
-        "--tinysam_checkpoint",
+        "--vision_encoder_type",
+        type=str,
+        default="tinysam",
+        choices=["tinysam", "sam_med2d", "sammed2d"],
+        help="Type of vision encoder to use: tinysam or sam_med2d (default: tinysam)",
+    )
+    parser.add_argument(
+        "--vision_encoder_checkpoint",
         type=str,
         default="weights/tinysam_42.3.pth",
-        help="Path to TinySAM checkpoint (default: weights/tinysam_42.3.pth)",
+        help="Path to vision encoder checkpoint (TinySAM or SAM-Med2D) (default: weights/tinysam_42.3.pth)",
+    )
+    parser.add_argument(
+        "--tinysam_checkpoint",
+        type=str,
+        default=None,
+        help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
     )
     parser.add_argument(
         "--lora_rank",

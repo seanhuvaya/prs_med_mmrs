@@ -14,7 +14,7 @@ import sys
 # Import components
 from data.dataset import PRSMedDataLoader  # optional, kept for compatibility
 from data.dataset import PRSMedDataset
-from models.vision_backbone.tiny_sam_encoder import TinySAMVisionBackbone
+from models.vision_backbone import create_vision_backbone
 from models.mllm.llava_med_lora_adapter import LLavaMedWithLoRA
 from models.decoder.fusion_module import PromptMaskFusionModule
 from models.decoder.mask_prediction_module import MaskPredictionModule
@@ -43,8 +43,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PRS-Med Training (Single GPU)')
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
-    parser.add_argument('--tinysam_checkpoint', type=str, default='weights/tinysam_42.3.pth',
-                        help='Path to TinySAM checkpoint')
+    parser.add_argument('--vision_encoder_type', type=str, default='tinysam',
+                        choices=['tinysam', 'sam_med2d', 'sammed2d'],
+                        help='Type of vision encoder to use: tinysam or sam_med2d')
+    parser.add_argument('--vision_encoder_checkpoint', type=str, default='weights/tinysam_42.3.pth',
+                        help='Path to vision encoder checkpoint (TinySAM or SAM-Med2D)')
+    parser.add_argument('--tinysam_checkpoint', type=str, default=None,
+                        help='[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)')
     parser.add_argument('--lora_rank', type=int, default=16)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
@@ -200,7 +205,7 @@ def save_checkpoint(epoch, model, optimizer, checkpoint_dir, is_best=False, max_
 class PRSMedModel(nn.Module):
     """
     Complete PRS-Med model:
-      - Vision backbone: TinySAM
+      - Vision backbone: TinySAM or SAM-Med2D (configurable)
       - MLLM: LLaVA-Med + LoRA (LLavaMedWithLoRA)
       - Fusion: PromptMaskFusionModule
       - Seg head: MaskPredictionModule
@@ -214,9 +219,17 @@ class PRSMedModel(nn.Module):
         self.device = device
         self.image_size = args.image_size
 
-        # Vision backbone
-        self.vision_backbone = TinySAMVisionBackbone(
-            checkpoint_path=args.tinysam_checkpoint,
+        # Determine checkpoint path (support both old and new argument names)
+        checkpoint_path = args.vision_encoder_checkpoint
+        if checkpoint_path is None or checkpoint_path == 'weights/tinysam_42.3.pth':
+            # Fallback to deprecated argument for backward compatibility
+            if hasattr(args, 'tinysam_checkpoint') and args.tinysam_checkpoint is not None:
+                checkpoint_path = args.tinysam_checkpoint
+        
+        # Vision backbone (configurable)
+        self.vision_backbone = create_vision_backbone(
+            encoder_type=args.vision_encoder_type,
+            checkpoint_path=checkpoint_path,
             image_size=args.image_size,
             device=str(device),
         ).to(device)

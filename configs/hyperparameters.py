@@ -19,8 +19,10 @@ class PRSMedHyperparameters:
     """
     
     # ========== Model Architecture ==========
-    # Vision Backbone (TinySAM)
-    tinysam_checkpoint: str = "weights/tinysam_42.3.pth"
+    # Vision Backbone (TinySAM or SAM-Med2D)
+    vision_encoder_type: str = "tinysam"  # Options: "tinysam", "sam_med2d"
+    vision_encoder_checkpoint: str = "weights/tinysam_42.3.pth"  # Path to encoder checkpoint
+    tinysam_checkpoint: str = "weights/tinysam_42.3.pth"  # [Deprecated] Use vision_encoder_checkpoint instead
     image_size: int = 1024  # [PAPER] Image resolution
     
     # MLLM (LLaVA-Med)
@@ -76,7 +78,9 @@ class PRSMedHyperparameters:
         """Convert to dictionary for logging/saving."""
         return {
             "model": {
-                "tinysam_checkpoint": self.tinysam_checkpoint,
+                "vision_encoder_type": self.vision_encoder_type,
+                "vision_encoder_checkpoint": self.vision_encoder_checkpoint,
+                "tinysam_checkpoint": self.tinysam_checkpoint,  # Deprecated, kept for compatibility
                 "image_size": self.image_size,
                 "mllm_model_name": self.mllm_model_name,
                 "freeze_llm": self.freeze_llm,

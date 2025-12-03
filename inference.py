@@ -47,10 +47,23 @@ def parse_args():
         help="Image size (default: 1024)",
     )
     parser.add_argument(
-        "--tinysam_checkpoint",
+        "--vision_encoder_type",
+        type=str,
+        default="tinysam",
+        choices=["tinysam", "sam_med2d", "sammed2d"],
+        help="Type of vision encoder to use: tinysam or sam_med2d (default: tinysam)",
+    )
+    parser.add_argument(
+        "--vision_encoder_checkpoint",
         type=str,
         default="weights/tinysam_42.3.pth",
-        help="Path to TinySAM checkpoint (default: weights/tinysam_42.3.pth)",
+        help="Path to vision encoder checkpoint (TinySAM or SAM-Med2D) (default: weights/tinysam_42.3.pth)",
+    )
+    parser.add_argument(
+        "--tinysam_checkpoint",
+        type=str,
+        default=None,
+        help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
     )
     parser.add_argument(
         "--lora_rank",
@@ -127,7 +140,13 @@ def load_model_from_checkpoint(checkpoint_path: str, args, device: torch.device)
 
     margs = ModelArgs()
     margs.image_size = args.image_size
-    margs.tinysam_checkpoint = args.tinysam_checkpoint
+    margs.vision_encoder_type = args.vision_encoder_type
+    margs.vision_encoder_checkpoint = args.vision_encoder_checkpoint
+    # Support deprecated argument for backward compatibility
+    if args.tinysam_checkpoint is not None:
+        margs.tinysam_checkpoint = args.tinysam_checkpoint
+    else:
+        margs.tinysam_checkpoint = None
     margs.lora_rank = args.lora_rank
     margs.lora_alpha = args.lora_alpha
     margs.lora_dropout = args.lora_dropout
