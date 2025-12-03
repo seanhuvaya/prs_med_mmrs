@@ -87,10 +87,10 @@ fi
 # ---- Configure AWS credentials ----
 log "Setting credentials for profile: ${AWS_PROFILE}..."
 
-aws configure set aws_access_key_id        "$AWS_ACCESS_KEY_ID"        --profile "$AWS_PROFILE"
-aws configure set aws_secret_access_key    "$AWS_SECRET_ACCESS_KEY"    --profile "$AWS_PROFILE"
-aws configure set region                   "$AWS_DEFAULT_REGION"       --profile "$AWS_PROFILE"
-aws configure set output                   "json"                      --profile "$AWS_PROFILE"
+aws configure set aws_access_key_id     "$AWS_ACCESS_KEY_ID"     --profile "$AWS_PROFILE"
+aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$AWS_PROFILE"
+aws configure set region                "$AWS_DEFAULT_REGION"    --profile "$AWS_PROFILE"
+aws configure set output                "json"                   --profile "$AWS_PROFILE"
 
 ok "AWS credentials configured for profile '$AWS_PROFILE'."
 
@@ -120,19 +120,30 @@ log "Syncing dependencies with uv..."
 uv sync
 ok "Dependencies synced."
 
+# ---- Ensure vision encoder checkpoint exists (download if needed) ----
+# Only auto-download if using SAM-Med2D and the file does not already exist.
+if [ "$VISION_ENCODER_TYPE" = "sam_med2d" ] && [ ! -f "$VISION_ENCODER_CHECKPOINT" ]; then
+    log "VISION_ENCODER_TYPE is 'sam_med2d' and checkpoint '$VISION_ENCODER_CHECKPOINT' not found."
+    log "Downloading SAM2.1 Hiera Tiny checkpoint..."
+
+    mkdir -p "$(dirname "$VISION_ENCODER_CHECKPOINT")"
+
+    curl -fsSL --retry 5 --retry-delay 2 \
+        -o "$VISION_ENCODER_CHECKPOINT" \
+        "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt"
+
+    ok "SAM2.1 Hiera Tiny checkpoint downloaded to $VISION_ENCODER_CHECKPOINT."
+fi
+
 # ---- Train model ----
 log "Training model..."
 mkdir -p "$CHECKPOINTS_DIR"
-
-echo "${BLUE}Downloading SAM2.1 Hiera Tiny checkpoint...${NC}"
-wget -O "weights/sam2.1_hiera_tiny.pt" "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt" 
-
 
 uv run python -m train_prs_med \
   --data_root "$LOCAL_DATA_URI" \
   --vision_encoder_type "$VISION_ENCODER_TYPE" \
   --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
-  --checkpoint_dir "$CHECKPOINTS_DIR" \
+  --checkpoint_dir "$CHECKPOINTS_DIR"
 
 ok "Training finished."
 

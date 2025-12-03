@@ -1,7 +1,7 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
 ## Run Train script
 ```bash
-curl -fsSL https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
+curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
   | bash -s -- \
   YOUR_AWS_ACCESS_KEY_ID \
   YOUR_AWS_SECRET_ACCESS_KEY \
