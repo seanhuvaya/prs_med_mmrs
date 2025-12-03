@@ -157,7 +157,8 @@ uv run python -m train_prs_med \
     --data_root "$LOCAL_DATA_URI" \
     --vision_encoder_type "$VISION_ENCODER_TYPE" \
     --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
-    --checkpoint_dir "$CHECKPOINTS_DIR"
+    --checkpoint_dir "$CHECKPOINTS_DIR" \
+    --lambda_txt 1
 
 ok "Training finished."
 
