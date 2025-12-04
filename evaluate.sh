@@ -38,7 +38,7 @@ err() {
 }
 
 # ---- Argument parsing ----
-if [ "$#" -ne 10 ]; then
+if [ "$#" -ne 11 ]; then
     err "Error: Expected 10 arguments, got $#."
     usage
 fi
