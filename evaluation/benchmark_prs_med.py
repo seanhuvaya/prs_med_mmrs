@@ -323,25 +323,25 @@ def evaluate_prs_med(
     )
 
     # Llama 3.1 agent
-    print("\nLoading Llama 3.1 judge model from HuggingFace:")
-    print(f"  {llama_model_name}")
-    llama_judge = HFJudge(llama_model_name, judge_device)
-
-    llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
-        llama_judge,
-        questions_all,
-        pred_texts_all=pred_texts_all,
-        gt_texts=gt_texts_all,
-    )
+    # print("\nLoading Llama 3.1 judge model from HuggingFace:")
+    # print(f"  {llama_model_name}")
+    # llama_judge = HFJudge(llama_model_name, judge_device)
+    #
+    # llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
+    #     llama_judge,
+    #     questions_all,
+    #     pred_texts_all=pred_texts_all,
+    #     gt_texts=gt_texts_all,
+    # )
 
     # Final result: mean of agents' accuracies
-    final_reasoning_acc = (qwen_acc + llama_acc) / 2.0
+    final_reasoning_acc = qwen_acc # + llama_acc) / 2.0
 
     print("\n" + "=" * 60)
     print("Position Reasoning Benchmark (PRS-Med)")
     print("Each agent: mean ± std over 3 prompt variants")
     print(f"  Qwen 3:     {qwen_acc:.3f} ({qwen_std:.3f})")
-    print(f"  Llama 3.1:  {llama_acc:.3f} ({llama_std:.3f})")
+    # print(f"  Llama 3.1:  {llama_acc:.3f} ({llama_std:.3f})")
     print(f"  Final Acc:  {final_reasoning_acc:.3f}")
     print("=" * 60 + "\n")
 
@@ -350,11 +350,11 @@ def evaluate_prs_med(
         "mIoU": mIoU,
         "qwen_acc": qwen_acc,
         "qwen_std": qwen_std,
-        "llama_acc": llama_acc,
-        "llama_std": llama_std,
+        # "llama_acc": llama_acc,
+        # "llama_std": llama_std,
         "final_reasoning_acc": final_reasoning_acc,
         "qwen_per_prompt_acc": qwen_per_prompt,   # 3 values
-        "llama_per_prompt_acc": llama_per_prompt, # 3 values
+        # "llama_per_prompt_acc": llama_per_prompt, # 3 values
     }
 
     return metrics
