@@ -228,7 +228,7 @@ class PRSMedModel(nn.Module):
         
         # Vision backbone (configurable)
         self.vision_backbone = create_vision_backbone(
-            encoder_type=args.vision_encoder_type,
+            encoder_type="tinysam",
             checkpoint_path=checkpoint_path,
             image_size=args.image_size,
             device=str(device),
