@@ -103,6 +103,12 @@ def parse_args():
         default=None,
         help="Evaluate on specific dataset only (optional)",
     )
+    parser.add_argument(
+        "--tinysam_checkpoint",
+        type=str,
+        default=None,
+        help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
+    )
     return parser.parse_args()
 
 
@@ -309,8 +315,16 @@ def run_inference(args):
 
     # ------------------ Save figure & CSV ------------------
     checkpoint_name = Path(args.checkpoint).stem
-    fig_path = output_dir / f"sample_predictions_{args.split}_{checkpoint_name}.png"
-    csv_path = output_dir / f"sample_predictions_{args.split}_{checkpoint_name}.csv"
+    fig_path = output_dir / (
+        f"sample_predictions_{args.split}"
+        f"{'_' + args.specific_dataset if args.specific_dataset else ''}"
+        f"_{checkpoint_name}.png"
+    )
+    csv_path = output_dir / (
+        f"sample_predictions_{args.split}"
+        f"{'_' + args.specific_dataset if args.specific_dataset else ''}"
+        f"_{checkpoint_name}.csv"
+    )
 
     plt.tight_layout()
     plt.savefig(fig_path, dpi=150)
