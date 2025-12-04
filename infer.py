@@ -237,8 +237,9 @@ def run_inference(args):
             else:
                 questions = question  # already batch-like
 
+            answers = sample.get("answers", [])
             # ---- Forward pass ----
-            outputs = model(image, questions)
+            outputs = model(image, questions, answers)
             z_mask = outputs["z_mask"]  # [B, 1, H, W] or [B, H, W]
 
             # Resize pred mask to GT size if needed
