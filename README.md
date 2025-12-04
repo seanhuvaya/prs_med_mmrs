@@ -15,6 +15,22 @@ curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https:
   weights/sam2.1_hiera_tiny.pt
 
 ```
+
+```bash
+curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/evaluate.sh \
+  | bash -s -- \
+  YOUR_AWS_ACCESS_KEY_ID \
+  YOUR_AWS_SECRET_ACCESS_KEY \
+  us-east-1 \
+  prs-med \
+  s3://prs-med-dataset/new_data \
+  /workspace/data \
+  s3://prs-med-dataset/checkpoints/training_20251203_165217/best_model_epoch_20.pth \
+  /workspace/checkpoints/best_model.pth \
+  sam_med2d \
+  weights/sam2.1_hiera_tiny.pt \
+  prostate
+```
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.9+-orange.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
