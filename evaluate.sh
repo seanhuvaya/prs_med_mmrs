@@ -146,7 +146,7 @@ if [ "$VISION_ENCODER_TYPE" = "sam_med2d" ] && [ ! -f "$VISION_ENCODER_CHECKPOIN
 fi
 
 log "Evaluating model..."
-uv run python evaluation.benchmark_prs_med \
+uv run python -m evaluation.benchmark_prs_med \
     --checkpoint "$LOCAL_CHECKPOINT_URI" \
     --data_root "$LOCAL_DATA_URI" \
     --output_dir "$LOCAL_OUTPUT_DIR" \
