@@ -109,6 +109,11 @@ def parse_args():
         default=None,
         help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
     )
+    parser.add_argument(
+        "--training",
+        type=bool,
+        default=False,
+    )
     return parser.parse_args()
 
 
@@ -155,6 +160,8 @@ def load_model_from_checkpoint(checkpoint_path: str, args, device: torch.device)
     margs.lora_rank = args.lora_rank
     margs.lora_alpha = args.lora_alpha
     margs.lora_dropout = args.lora_dropout
+
+    margs.training_texts = args.training_texts
 
     # Initialize model
     model = PRSMedModel(margs, device)
@@ -259,17 +266,8 @@ def run_inference(args):
                 # if model pipeline stored tokenized output or weird format
                 questions = [str(question)]
 
-            # Answers (ground truth text)
-            answers = sample.get("answers", [])
-
-            # Normalize answers
-            if isinstance(answers, str):
-                answers = [answers]
-            elif not isinstance(answers, list):
-                answers = [str(answers)]
-
             # ---- Forward pass ----
-            outputs = model(image, questions, answers)
+            outputs = model(image, questions, training=False)
             z_mask = outputs["z_mask"]  # [B, 1, H, W] or [B, H, W]
 
             # Resize pred mask to GT size if needed

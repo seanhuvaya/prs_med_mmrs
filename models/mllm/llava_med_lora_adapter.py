@@ -19,12 +19,14 @@ class LLavaMedWithLoRA(LLavaMedMLLM):
         alpha: int = 16,
         dropout: float = 0.05,
         freeze_llm: bool = True,
+        training_texts: bool = True,
         device: Optional[str] = None,
     ):
         super().__init__(
             model_name=model_name,
             freeze_llm=freeze_llm,
             device=device,
+            training_texts=training_texts
         )
 
         self.lora_config = LoraConfig(

@@ -27,6 +27,7 @@ class LLavaMedMLLM(nn.Module):
         dtype: Optional[torch.dtype] = None,
         freeze_llm: bool = True,
         max_new_tokens: int = 0,
+        training_texts: bool = True,
     ):
         super().__init__()
 
@@ -83,6 +84,8 @@ class LLavaMedMLLM(nn.Module):
 
         for p in self.to_seg_channels.parameters():
             p.requires_grad = True
+
+        self.training_texts = training_texts
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -143,7 +146,7 @@ class LLavaMedMLLM(nn.Module):
         images = self._ensure_images(images)
 
         # ---------- Build text inputs ---------- #
-        if training_text:
+        if self.training_text:
             # Question + answer text (X_txt for Eq. (1), Eq. (7))
             assert answers is not None, "answers must be provided when training_text=True"
             assert len(answers) == len(questions), "questions and answers must match in batch size"

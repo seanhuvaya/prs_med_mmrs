@@ -241,6 +241,7 @@ class PRSMedModel(nn.Module):
             dropout=args.lora_dropout,
             freeze_llm=True,
             device=str(device),
+            training_texts=args.training_texts
         ).to(device)
 
         # Fusion + mask predictor
