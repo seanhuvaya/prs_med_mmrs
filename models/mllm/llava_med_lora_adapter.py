@@ -79,7 +79,7 @@ if __name__ == "__main__":
             batch_images,
             batch_questions,
             answers=batch_answers,
-            training_text=True,
+            training_texts=True,
             return_projected=True,
         )
 

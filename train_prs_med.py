@@ -273,7 +273,7 @@ class PRSMedModel(nn.Module):
         images: torch.Tensor,
         questions: list,
         answers: list = None,
-        training_text: bool = True,
+        training_texts: bool = True,
     ):
         # Images to device
         if images.device != self.device:
@@ -293,7 +293,7 @@ class PRSMedModel(nn.Module):
             processed_images,
             questions,
             answers=answers,
-            training_text=training_text,
+            training_texts=training_texts,
             return_projected=True,
         )
         z_emb = mllm_out["z_emb"].float()
@@ -446,7 +446,7 @@ def main():
                         images,
                         questions,
                         answers,
-                        training_text=True,
+                        training_texts=True,
                     )
                     pred_masks = outputs["z_mask"]
                     text_logits = outputs["z_txt_logits"]
@@ -474,7 +474,7 @@ def main():
                     images,
                     questions,
                     answers,
-                    training_text=True,
+                    training_texts=True,
                 )
                 pred_masks = outputs["z_mask"]
                 text_logits = outputs["z_txt_logits"]
@@ -565,7 +565,7 @@ def main():
                             images,
                             questions,
                             answers,
-                            training_text=True,
+                            training_texts=True,
                         )
                         pred_masks = outputs["z_mask"]
                         text_logits = outputs["z_txt_logits"]
@@ -588,7 +588,7 @@ def main():
                         images,
                         questions,
                         answers,
-                        training_text=True,
+                        training_texts=True,
                     )
                     pred_masks = outputs["z_mask"]
                     text_logits = outputs["z_txt_logits"]

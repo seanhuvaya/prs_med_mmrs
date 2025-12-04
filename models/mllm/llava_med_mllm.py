@@ -122,15 +122,14 @@ class LLavaMedMLLM(nn.Module):
         images: List[Union[Image.Image, torch.Tensor]],
         questions: List[str],
         answers: Optional[List[str]] = None,
-        return_projected: bool = True,
-        training_text: bool = False,
+        return_projected: bool = True
     ):
         """
         Args:
             images:        list[PIL.Image or 3xHxW tensor]
             questions:     list[str]
-            answers:       list[str] (only used when training_text=True)
-            training_text: if True, use full question+answer text
+            answers:       list[str] (only used when training_texts=True)
+            training_texts: if True, use full question+answer text
                            for CE loss (Eq. 7). If False, question-only.
 
         Returns:
@@ -146,9 +145,9 @@ class LLavaMedMLLM(nn.Module):
         images = self._ensure_images(images)
 
         # ---------- Build text inputs ---------- #
-        if self.training_text:
+        if self.training_texts:
             # Question + answer text (X_txt for Eq. (1), Eq. (7))
-            assert answers is not None, "answers must be provided when training_text=True"
+            assert answers is not None, "answers must be provided when training_texts=True"
             assert len(answers) == len(questions), "questions and answers must match in batch size"
 
             texts_full = [
@@ -229,7 +228,7 @@ if __name__ == "__main__":
             batch_images,
             batch_questions,
             answers=batch_answers,
-            training_text=True,
+            training_texts=True,
             return_projected=True,
         )
 
