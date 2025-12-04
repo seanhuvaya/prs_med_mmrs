@@ -110,7 +110,7 @@ def parse_args():
         help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
     )
     parser.add_argument(
-        "--training",
+        "--training_texts",
         type=bool,
         default=False,
     )
