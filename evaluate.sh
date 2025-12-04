@@ -38,10 +38,10 @@ err() {
 }
 
 # ---- Argument parsing ----
-if [ "$#" -ne 11 ]; then
-    err "Error: Expected 10 arguments, got $#."
-    usage
-fi
+#if [ "$#" -ne 11 ]; then
+#    err "Error: Expected 10 arguments, got $#."
+#    usage
+#fi
 
 AWS_ACCESS_KEY_ID="$1"
 AWS_SECRET_ACCESS_KEY="$2"
