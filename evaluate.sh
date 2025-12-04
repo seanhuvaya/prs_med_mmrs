@@ -54,6 +54,7 @@ LOCAL_CHECKPOINT_URI="$8"
 VISION_ENCODER_TYPE="$9"
 VISION_ENCODER_CHECKPOINT="${10}"
 DATASET_NAME="${11}"
+LOCAL_OUTPUT_DIR="${12}"
 
 
 REPO_URL="https://github.com/seanhuvaya/prs_med_mmrs.git"
