@@ -272,7 +272,7 @@ class PRSMedModel(nn.Module):
         self,
         images: torch.Tensor,
         questions: list,
-        answers: list,
+        answers: list = None,
         training_text: bool = True,
     ):
         # Images to device
