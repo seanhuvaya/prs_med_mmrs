@@ -110,7 +110,14 @@ ok "Dataset sync complete."
 
 # ---- Download model checkpoint from s3 ---
 log "Downloading model checkpoint from ${AWS_S3_BUCKET_CHECKPOINT_URI} to ${LOCAL_CHECKPOINT_URI}"
-mkdir "/workspace/checkpoints"
+
+if [ ! -d "/workspace/checkpoints" ]; then
+    mkdir -p "/workspace/checkpoints"
+    echo "Directory '/workspace/checkpoints' created."
+else
+    echo "Directory '/workspace/checkpoints' already exists."
+fi
+
 aws s3 cp "$AWS_S3_BUCKET_CHECKPOINT_URI" "$LOCAL_CHECKPOINT_URI"
 
 # ---- Clone or update git repo ----
