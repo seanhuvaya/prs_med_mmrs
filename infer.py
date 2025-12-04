@@ -60,12 +60,6 @@ def parse_args():
         help="Path to vision encoder checkpoint (TinySAM or SAM-Med2D) (default: weights/tinysam_42.3.pth)",
     )
     parser.add_argument(
-        "--tinysam_checkpoint",
-        type=str,
-        default=None,
-        help="[Deprecated] Path to TinySAM checkpoint (use --vision_encoder_checkpoint instead)",
-    )
-    parser.add_argument(
         "--lora_rank",
         type=int,
         default=16,
@@ -103,7 +97,12 @@ def parse_args():
         default=42,
         help="Random seed for sampling (default: 42)",
     )
-
+    parser.add_argument(
+        "--specific_dataset",
+        type=str,
+        default=None,
+        help="Evaluate on specific dataset only (optional)",
+    )
     return parser.parse_args()
 
 
@@ -198,7 +197,7 @@ def run_inference(args):
 
     # Load dataset
     print(f"\nLoading '{args.split}' split from {args.data_root}...")
-    dataset = PRSMedDataset(split=args.split, data_root=args.data_root)
+    dataset = PRSMedDataset(split=args.split, data_root=args.data_root, specific_dataset=args.specific_dataset)
     print(f"Dataset size: {len(dataset)} samples")
 
     num_samples = min(args.num_samples, len(dataset))

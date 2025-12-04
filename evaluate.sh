@@ -118,6 +118,11 @@ else
     echo "Directory '/workspace/checkpoints' already exists."
 fi
 
+if [ ! -d "$LOCAL_OUTPUT_DIR" ]; then
+  mkdir -p "$LOCAL_OUTPUT_DIR"
+  echo "Directory '$LOCAL_OUTPUT_DIR' created"
+fi
+
 aws s3 cp "$AWS_S3_BUCKET_CHECKPOINT_URI" "$LOCAL_CHECKPOINT_URI"
 
 # ---- Clone or update git repo ----
