@@ -163,7 +163,7 @@ uv run python -m evaluation.benchmark_prs_med \
     --data_root "$LOCAL_DATA_URI" \
     --output_dir "$LOCAL_OUTPUT_DIR" \
     --split "test" \
-    --vision_encoder_type "sam_med2d" \
+    --vision_encoder_type "$VISION_ENCODER_TYPE" \
     --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
     --specific_dataset "$DATASET_NAME"
 
