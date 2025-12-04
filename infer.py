@@ -224,20 +224,50 @@ def run_inference(args):
             sample = dataset[idx]
 
             # ---- Inputs ----
-            image = sample["image"].unsqueeze(0).to(device)  # [1, C, H, W]
-            gt_mask = sample["mask"]
-            if isinstance(gt_mask, torch.Tensor):
-                gt_mask = gt_mask.unsqueeze(0).to(device) if gt_mask.ndim == 3 else gt_mask.to(device)
-            else:
-                gt_mask = torch.tensor(gt_mask, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
 
+            # Image (always shape [1, C, H, W])
+            image = sample["image"]
+            if isinstance(image, torch.Tensor):
+                image = image.unsqueeze(0).to(device)  # [1, C, H, W]
+            else:
+                image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).to(device)
+
+            # Ground truth mask
+            gt_mask = sample["mask"]
+
+            if isinstance(gt_mask, torch.Tensor):
+                # - If mask is [H, W] → make [1, 1, H, W]
+                # - If mask is [1, H, W] → good
+                # - If mask is [C, H, W] → assume already structured
+                if gt_mask.ndim == 2:
+                    gt_mask = gt_mask.unsqueeze(0).unsqueeze(0).to(device)
+                elif gt_mask.ndim == 3:
+                    gt_mask = gt_mask.unsqueeze(0).to(device)
+                else:
+                    gt_mask = gt_mask.to(device)
+            else:
+                # Convert numpy or list → torch [1, 1, H, W]
+                gt_mask = torch.tensor(gt_mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+
+            # Question
             question = sample.get("question", "")
             if isinstance(question, str):
-                questions = [question]
+                questions = [question]  # convert to list of length 1
+            elif isinstance(question, list):
+                questions = question  # already list
             else:
-                questions = question  # already batch-like
+                # if model pipeline stored tokenized output or weird format
+                questions = [str(question)]
 
+            # Answers (ground truth text)
             answers = sample.get("answers", [])
+
+            # Normalize answers
+            if isinstance(answers, str):
+                answers = [answers]
+            elif not isinstance(answers, list):
+                answers = [str(answers)]
+
             # ---- Forward pass ----
             outputs = model(image, questions, answers)
             z_mask = outputs["z_mask"]  # [B, 1, H, W] or [B, H, W]
