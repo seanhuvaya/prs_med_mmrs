@@ -121,6 +121,7 @@ class LLavaMedMLLM(nn.Module):
         self,
         images: List[Union[Image.Image, torch.Tensor]],
         questions: List[str],
+        training_texts: bool = True,
         answers: Optional[List[str]] = None,
         return_projected: bool = True
     ):
