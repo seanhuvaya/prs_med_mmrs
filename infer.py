@@ -267,7 +267,7 @@ def run_inference(args):
                 questions = [str(question)]
 
             # ---- Forward pass ----
-            outputs = model(image, questions, training=False)
+            outputs = model(image, questions)
             z_mask = outputs["z_mask"]  # [B, 1, H, W] or [B, H, W]
 
             # Resize pred mask to GT size if needed
