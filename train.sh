@@ -158,6 +158,7 @@ uv run python -m train_prs_med \
     --vision_encoder_type "$VISION_ENCODER_TYPE" \
     --vision_encoder_checkpoint "$VISION_ENCODER_CHECKPOINT" \
     --checkpoint_dir "$CHECKPOINTS_DIR" \
+    --num_epochs 5
     --lambda_txt 1
 
 ok "Training finished."

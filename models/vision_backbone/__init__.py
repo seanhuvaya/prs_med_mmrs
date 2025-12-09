@@ -51,3 +51,8 @@ def create_vision_backbone(
             f"Unsupported encoder_type: {encoder_type}. "
             f"Supported options: 'tinysam', 'sam_med2d'"
         )
+
+__all__ = [
+    "TinySAMVisionBackbone",
+    "create_vision_backbone",
+]

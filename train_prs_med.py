@@ -70,15 +70,32 @@ def parse_args():
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--gradient_checkpointing', action='store_true', default=False)
     parser.add_argument('--compile_model', action='store_true', default=False)
+    parser.add_argument('--training_texts', action='store_true', default=True,
+                        help='Use full question+answer text for training (default: True)')
+    parser.add_argument('--no-training_texts', dest='training_texts', action='store_false')
     return parser.parse_args()
 
 
-def prepare_text_targets(full_texts, tokenizer, max_length=512):
+def prepare_text_targets(full_texts, tokenizer, max_length=512, ignore_index=-100):
     """
-    Tokenize the EXACT same text used as input to MLLM:
-      "USER: <image>\\n{question}\\nASSISTANT: {answer}"
-    so CE(ŷ_txt, z_txt) is valid (Eq. 7).
+    Prepare text targets for causal LM training with proper shift-left.
+    
+    For causal LMs: logits[i] predicts token[i+1]
+    We need to:
+    1. Shift targets left by 1: labels[i] = input_ids[i+1]
+    2. Mask question tokens (only compute loss on answer tokens after "ASSISTANT:")
+    3. Mask padding tokens
+    
+    Args:
+        full_texts: List of full texts like "USER: <image>\\n{question}\\nASSISTANT: {answer}"
+        tokenizer: Tokenizer to use
+        max_length: Maximum sequence length
+        ignore_index: Token index to ignore in loss (typically -100)
+    
+    Returns:
+        labels: (B, L) tensor with shifted targets, question/padding tokens set to ignore_index
     """
+    # Tokenize the full texts
     tokenized = tokenizer(
         full_texts,
         padding='max_length',
@@ -86,7 +103,60 @@ def prepare_text_targets(full_texts, tokenizer, max_length=512):
         max_length=max_length,
         return_tensors='pt'
     )
-    return tokenized.input_ids
+    input_ids = tokenized.input_ids  # (B, L)
+    B, L = input_ids.shape
+    
+    # Initialize labels with ignore_index
+    labels = torch.full_like(input_ids, ignore_index)
+    
+    # Tokenize "ASSISTANT:" to find where answer starts
+    # Try different variations
+    assistant_strs = ["ASSISTANT:", "ASSISTANT", "assistant:"]
+    assistant_tokens_list = []
+    for s in assistant_strs:
+        tokens = tokenizer.encode(s, add_special_tokens=False)
+        if len(tokens) > 0:
+            assistant_tokens_list.append(tokens)
+    
+    if len(assistant_tokens_list) == 0:
+        # Fallback: use a simple heuristic - assume answer is in last 40% of sequence
+        print("WARNING: Could not find ASSISTANT token, using heuristic")
+        for b in range(B):
+            answer_start = int(L * 0.6)  # Start from 60% of sequence
+            for i in range(answer_start, L - 1):
+                if input_ids[b, i + 1] != tokenizer.pad_token_id:
+                    labels[b, i] = input_ids[b, i + 1]
+    else:
+        # Use the first found assistant token pattern
+        assistant_tokens = assistant_tokens_list[0]
+        
+        # For each sequence, find where ASSISTANT starts
+        for b in range(B):
+            seq = input_ids[b].tolist()
+            assistant_start = -1
+            
+            # Find the position where ASSISTANT token sequence starts
+            for i in range(len(seq) - len(assistant_tokens) + 1):
+                if seq[i:i+len(assistant_tokens)] == assistant_tokens:
+                    assistant_start = i + len(assistant_tokens)
+                    break
+            
+            if assistant_start >= 0:
+                # Shift left: labels[i] = input_ids[i+1] for answer tokens
+                # Only compute loss on tokens after ASSISTANT
+                for i in range(assistant_start, L - 1):
+                    next_token = input_ids[b, i + 1]
+                    if next_token != tokenizer.pad_token_id:
+                        labels[b, i] = next_token
+                    # else: already ignore_index
+            else:
+                # Fallback: use last 40% of sequence
+                answer_start = int(L * 0.6)
+                for i in range(answer_start, L - 1):
+                    if input_ids[b, i + 1] != tokenizer.pad_token_id:
+                        labels[b, i] = input_ids[b, i + 1]
+    
+    return labels
 
 
 def check_disk_space(path, required_gb=5.0):
@@ -405,6 +475,30 @@ def main():
 
     # Optimizer & loss
     trainable_params = [p for p in model.parameters() if p.requires_grad]
+    num_trainable = sum(p.numel() for p in trainable_params)
+    num_total = sum(p.numel() for p in model.parameters())
+    
+    print(f"\n✓ Model parameter summary:")
+    print(f"  Total parameters: {num_total:,}")
+    print(f"  Trainable parameters: {num_trainable:,} ({100*num_trainable/num_total:.2f}%)")
+    
+    # Verify LoRA parameters are trainable
+    lora_params = [p for name, p in model.named_parameters() if "lora_" in name and p.requires_grad]
+    num_lora = sum(p.numel() for p in lora_params)
+    print(f"  LoRA parameters: {num_lora:,}")
+    
+    # Verify other trainable components
+    projector_params = [p for name, p in model.named_parameters() if "to_seg_channels" in name and p.requires_grad]
+    fusion_params = [p for name, p in model.named_parameters() if "fusion_module" in name and p.requires_grad]
+    mask_params = [p for name, p in model.named_parameters() if "mask_predictor" in name and p.requires_grad]
+    
+    print(f"  Projector parameters: {sum(p.numel() for p in projector_params):,}")
+    print(f"  Fusion parameters: {sum(p.numel() for p in fusion_params):,}")
+    print(f"  Mask predictor parameters: {sum(p.numel() for p in mask_params):,}")
+    
+    if num_trainable == 0:
+        print("⚠️  WARNING: No trainable parameters found! Model will not learn.")
+    
     optimizer = optim.AdamW(
         trainable_params,
         lr=args.learning_rate,
@@ -457,7 +551,7 @@ def main():
                         for q, a in zip(questions, answers)
                     ]
                     tokenizer = model.mllm.processor.tokenizer
-                    text_targets = prepare_text_targets(full_texts, tokenizer).to(device)
+                    text_targets = prepare_text_targets(full_texts, tokenizer, ignore_index=-100).to(device)
 
                     loss_dict = criterion(
                         z_mask=pred_masks,
@@ -484,7 +578,7 @@ def main():
                     for q, a in zip(questions, answers)
                 ]
                 tokenizer = model.mllm.processor.tokenizer
-                text_targets = prepare_text_targets(full_texts, tokenizer).to(device)
+                text_targets = prepare_text_targets(full_texts, tokenizer, ignore_index=-100).to(device)
 
                 loss_dict = criterion(
                     z_mask=pred_masks,
@@ -499,11 +593,16 @@ def main():
             if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
                 if scaler is not None:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    # Check for gradient flow
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    if batch_idx % 50 == 0:
+                        print(f"  Gradient norm: {grad_norm:.4f}")
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    if batch_idx % 50 == 0:
+                        print(f"  Gradient norm: {grad_norm:.4f}")
                     optimizer.step()
 
                 optimizer.zero_grad()
@@ -575,7 +674,7 @@ def main():
                             for q, a in zip(questions, answers)
                         ]
                         tokenizer = model.mllm.processor.tokenizer
-                        text_targets = prepare_text_targets(full_texts, tokenizer).to(device)
+                        text_targets = prepare_text_targets(full_texts, tokenizer, ignore_index=-100).to(device)
 
                         loss_dict = criterion(
                             z_mask=pred_masks,
@@ -598,7 +697,7 @@ def main():
                         for q, a in zip(questions, answers)
                     ]
                     tokenizer = model.mllm.processor.tokenizer
-                    text_targets = prepare_text_targets(full_texts, tokenizer).to(device)
+                    text_targets = prepare_text_targets(full_texts, tokenizer, ignore_index=-100).to(device)
 
                     loss_dict = criterion(
                         z_mask=pred_masks,

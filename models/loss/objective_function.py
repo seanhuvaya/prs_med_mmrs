@@ -57,8 +57,15 @@ class PRSMedLoss(nn.Module):
         loss_seg = loss_bce + loss_dice
 
         # ---- Text reasoning loss ---- #
-        # z_txt: (B, L, V)
-        # y_txt: (B, L)
+        # z_txt: (B, L, V) - logits from causal LM
+        # y_txt: (B, L) - labels (already shifted left: labels[i] = input_ids[i+1])
+        # 
+        # For causal LMs: logits[i] predicts token[i+1]
+        # Since labels[i] = input_ids[i+1], we have:
+        #   logits[i] should predict labels[i]
+        # So we use: z_txt[:, :-1, :] and y_txt[:, :-1]
+        # (Last position has no next token to predict)
+        
         B, L, V = z_txt.shape
         B_target, L_target = y_txt.shape
 
@@ -66,14 +73,21 @@ class PRSMedLoss(nn.Module):
             min_batch = min(B, B_target)
             z_txt = z_txt[:min_batch]
             y_txt = y_txt[:min_batch]
+            B = min_batch
 
-        if L != L_target:
-            min_seq = min(L, L_target)
-            z_txt = z_txt[:, :min_seq, :]
-            y_txt = y_txt[:, :min_seq]
-
-        z_txt_flat = z_txt.reshape(-1, V)
-        y_txt_flat = y_txt.reshape(-1)
+        # Align sequence lengths
+        min_seq = min(L, L_target)
+        z_txt = z_txt[:, :min_seq, :]
+        y_txt = y_txt[:, :min_seq]
+        L = min_seq
+        
+        # Shift alignment: logits[i] predicts labels[i] (which is input_ids[i+1])
+        # Use all positions except the last (since last logit has no next token)
+        z_txt_pred = z_txt[:, :-1, :].contiguous()  # (B, L-1, V)
+        y_txt_target = y_txt[:, :-1].contiguous()    # (B, L-1)
+        
+        z_txt_flat = z_txt_pred.reshape(-1, V)
+        y_txt_flat = y_txt_target.reshape(-1)
 
         loss_txt = self.ce(z_txt_flat, y_txt_flat)
 

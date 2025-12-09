@@ -313,16 +313,66 @@ def run_inference(args):
             pred_mask_path = masks_dir / pred_mask_name
             pred_mask_img.save(pred_mask_path)
 
-            # ---- Optional: decode predicted text ----
+            # ---- Optional: generate predicted text answer with LLaVA-Med ----
+            #
+            # NOTE:
+            #   During training we only use z_txt_logits for CE loss, so simply
+            #   argmax-decoding those logits (previous behavior) produces
+            #   corrupted text that mixes the prompt tokens ("USER:", "ASSISTANT:")
+            #   and does NOT correspond to an actually generated answer.
+            #
+            #   For qualitative inspection we instead run a proper generation step
+            #   with the underlying LLaVA-Med model using the same question prompt.
             try:
-                mllm_model = model.module if hasattr(model, "module") else model
-                pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
-                pred_text_batch = mllm_model.mllm.processor.batch_decode(
-                    pred_ids, skip_special_tokens=True
-                )
-                pred_text = pred_text_batch[0] if len(pred_text_batch) > 0 else ""
+                core_model = model.module if hasattr(model, "module") else model
+                mllm_wrapper = getattr(core_model, "mllm", None)
+
+                if mllm_wrapper is not None:
+                    # Build LLaVA-Med style prompt
+                    prompt = f"USER: <image>\n{question}\nASSISTANT:"
+
+                    # Use the raw image tensor for the processor; LLavaMedMLLM
+                    # internally expects CHW tensors / PIL images.
+                    if isinstance(sample["image"], torch.Tensor):
+                        img_for_llm = sample["image"].detach().cpu()
+                    else:
+                        img_for_llm = sample["image"]
+
+                    processor = mllm_wrapper.processor
+                    llm_device = mllm_wrapper.device
+
+                    proc_inputs = processor(
+                        images=[img_for_llm],
+                        text=[prompt],
+                        return_tensors="pt",
+                        padding=True,
+                    )
+
+                    # Move to correct device / dtype
+                    proc_inputs = {k: v.to(llm_device) for k, v in proc_inputs.items()}
+                    model_dtype = next(mllm_wrapper.model.parameters()).dtype
+                    for k, v in proc_inputs.items():
+                        if torch.is_floating_point(v):
+                            proc_inputs[k] = v.to(dtype=model_dtype)
+
+                    # Generate a short answer
+                    with torch.no_grad():
+                        gen_ids = mllm_wrapper.model.generate(
+                            **proc_inputs,
+                            max_new_tokens=32,
+                        )
+
+                    # Decode only the newly generated tokens after the prompt
+                    input_len = proc_inputs["input_ids"].shape[-1]
+                    gen_only = gen_ids[:, input_len:]
+                    pred_text_batch = processor.batch_decode(
+                        gen_only, skip_special_tokens=True
+                    )
+                    pred_text = pred_text_batch[0].strip() if len(pred_text_batch) > 0 else ""
+                else:
+                    pred_text = ""
             except Exception as e:
-                print(f"Warning: failed to decode text for idx={idx}: {e}")
+                print(f"Warning: failed to generate text for idx={idx}: {e}")
                 pred_text = ""
 
             # ---- Collect info for table ----
