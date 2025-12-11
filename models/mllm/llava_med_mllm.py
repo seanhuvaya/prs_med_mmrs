@@ -228,7 +228,10 @@ class LLavaMedMLLM(nn.Module):
         images: List[Union[Image.Image, torch.Tensor]],
         questions: List[str],
         max_new_tokens: int = 64,
-        temperature: float = 0.0,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
     ) -> List[str]:
         """
         Generate free-form answers for question-only prompts.
@@ -267,8 +270,11 @@ class LLavaMedMLLM(nn.Module):
         generation = self.model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=temperature > 0.0,
-            temperature=max(temperature, 1e-5) if temperature > 0 else None,
+            do_sample=True,
+            temperature=max(temperature, 1e-5),
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
         )
