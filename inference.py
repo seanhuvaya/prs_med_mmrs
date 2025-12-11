@@ -140,6 +140,8 @@ def load_model_from_checkpoint(checkpoint_path: str, args, device: torch.device)
 
     margs = ModelArgs()
     margs.image_size = args.image_size
+    # Inference uses question-only prompts by default (no teacher text)
+    margs.training_texts = False
     margs.vision_encoder_type = args.vision_encoder_type
     margs.vision_encoder_checkpoint = args.vision_encoder_checkpoint
     # Support deprecated argument for backward compatibility
