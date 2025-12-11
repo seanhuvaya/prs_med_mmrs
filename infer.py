@@ -331,12 +331,26 @@ def run_inference(args):
                     # Build LLaVA-Med style prompt
                     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-                    # Use the raw image tensor for the processor; LLavaMedMLLM
-                    # internally expects CHW tensors / PIL images.
-                    if isinstance(sample["image"], torch.Tensor):
-                        img_for_llm = sample["image"].detach().cpu()
+                    # Load original PIL image from file path to avoid normalized tensor issues
+                    # The dataset returns normalized tensors (ImageNet stats), but processor
+                    # expects PIL images or unnormalized tensors in [0, 1] or [0, 255]
+                    image_path = sample.get("image_path", "")
+                    if image_path and os.path.exists(image_path):
+                        img_for_llm = Image.open(image_path).convert("RGB")
                     else:
-                        img_for_llm = sample["image"]
+                        # Fallback: denormalize the tensor if we can't load from file
+                        # ImageNet normalization: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                        if isinstance(sample["image"], torch.Tensor):
+                            img_tensor = sample["image"].detach().cpu()
+                            # Denormalize: (normalized * std) + mean
+                            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                            img_tensor = img_tensor * std + mean
+                            img_tensor = torch.clamp(img_tensor, 0, 1)
+                            # Convert to PIL: CHW -> HWC -> PIL
+                            img_for_llm = Image.fromarray((img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+                        else:
+                            img_for_llm = sample["image"]
 
                     processor = mllm_wrapper.processor
                     llm_device = mllm_wrapper.device
