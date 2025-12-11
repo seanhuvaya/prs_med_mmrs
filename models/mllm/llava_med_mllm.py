@@ -121,7 +121,7 @@ class LLavaMedMLLM(nn.Module):
         self,
         images: List[Union[Image.Image, torch.Tensor]],
         questions: List[str],
-        training_texts: bool = True,
+        training_texts: Optional[bool] = True,
         answers: Optional[List[str]] = None,
         return_projected: bool = True
     ):
@@ -144,9 +144,15 @@ class LLavaMedMLLM(nn.Module):
         assert len(images) == len(questions), "Batch size mismatch between images and questions"
 
         images = self._ensure_images(images)
+        # training_texts flag:
+        # - If an explicit flag is passed, use it.
+        # - Otherwise, fall back to the instance default (self.training_texts).
+        effective_training_texts = (
+            self.training_texts if training_texts is None else training_texts
+        )
 
         # ---------- Build text inputs ---------- #
-        if self.training_texts:
+        if effective_training_texts:
             # Question + answer text (X_txt for Eq. (1), Eq. (7))
             assert answers is not None, "answers must be provided when training_texts=True"
             assert len(answers) == len(questions), "questions and answers must match in batch size"
@@ -212,6 +218,66 @@ class LLavaMedMLLM(nn.Module):
             out["z_emb_proj"] = z_emb_proj
 
         return out
+
+    # ------------------------------------------------------------------ #
+    # Inference helper (actual text generation)
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def generate_answers(
+        self,
+        images: List[Union[Image.Image, torch.Tensor]],
+        questions: List[str],
+        max_new_tokens: int = 64,
+        temperature: float = 0.0,
+    ) -> List[str]:
+        """
+        Generate free-form answers for question-only prompts.
+
+        Args:
+            images: list of images (PIL or tensors)
+            questions: list of questions (same length as images)
+            max_new_tokens: length of generated answer
+            temperature: >0 enables sampling; 0 = greedy
+        """
+        images = self._ensure_images(images)
+
+        texts_q = [
+            f"USER: <image>\n{q}\nASSISTANT:"
+            for q in questions
+        ]
+
+        inputs = self.processor(
+            images=images,
+            text=texts_q,
+            return_tensors="pt",
+            padding=True,
+        )
+
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        model_dtype = next(self.model.parameters()).dtype
+        for k, v in inputs.items():
+            if torch.is_floating_point(v):
+                inputs[k] = v.to(dtype=model_dtype)
+
+        # Ensure pad/eos tokens are set
+        tokenizer = self.processor.tokenizer
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        generation = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=temperature > 0.0,
+            temperature=max(temperature, 1e-5) if temperature > 0 else None,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+        # Remove the prompt portion
+        prompt_len = inputs["input_ids"].shape[1]
+        gen_only = generation[:, prompt_len:]
+        texts = self.processor.batch_decode(gen_only, skip_special_tokens=True)
+        return [t.strip() for t in texts]
 
 
 if __name__ == "__main__":

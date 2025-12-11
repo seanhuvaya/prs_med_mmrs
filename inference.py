@@ -233,7 +233,7 @@ def run_inference(args):
                 questions = question  # already batch-like
 
             # ---- Forward pass ----
-            outputs = model(image, questions)
+            outputs = model(image, questions, training_texts=False)
             z_mask = outputs["z_mask"]  # [B, 1, H, W] or [B, H, W]
 
             # Resize pred mask to GT size if needed
@@ -281,14 +281,17 @@ def run_inference(args):
 
             # ---- Optional: decode predicted text ----
             try:
-                mllm_model = model.module if hasattr(model, "module") else model
-                pred_ids = torch.argmax(outputs["z_txt_logits"], dim=-1)
-                pred_text_batch = mllm_model.mllm.processor.batch_decode(
-                    pred_ids, skip_special_tokens=True
+                mllm_wrapper = model.module if hasattr(model, "module") else model
+                # Generate fresh text instead of using teacher-forced logits
+                pred_texts = mllm_wrapper.mllm.generate_answers(
+                    images=[sample["image"]],
+                    questions=questions,
+                    max_new_tokens=64,
+                    temperature=0.0,
                 )
-                pred_text = pred_text_batch[0] if len(pred_text_batch) > 0 else ""
+                pred_text = pred_texts[0] if len(pred_texts) > 0 else ""
             except Exception as e:
-                print(f"Warning: failed to decode text for idx={idx}: {e}")
+                print(f"Warning: failed to generate text for idx={idx}: {e}")
                 pred_text = ""
 
             # ---- Collect info for table ----
