@@ -18,14 +18,8 @@ from models.llm_seg_original import build_llm_seg
 from data.dataset_original import create_dataloader
 from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/training.log'),
-        logging.StreamHandler()
-    ]
-)
+# Setup logging - will be configured in main() with proper log file path
+logger = logging.getLogger(__name__)
 
 def count_train_parameters(model):
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
@@ -126,8 +120,22 @@ def train(
             avg_llm_loss = total_llm_loss / (progress_bar.n + 1)
             avg_segment_loss = total_segment_loss / (progress_bar.n + 1)
             avg_cls_loss = total_cls_loss / (progress_bar.n + 1)
-            if progress_bar.n % 1000 == 0:
-                logging.info(f"Epoch [{epoch+1}/{num_epochs}], Step [{progress_bar.n}], Loss: {avg_loss}, LLM Loss: {avg_llm_loss}, Segment Loss: {avg_segment_loss}, Cls Loss: {avg_cls_loss}")
+            
+            # Log every batch to file
+            batch_num = progress_bar.n + 1
+            global_step = epoch * len(dataloader) + batch_num
+            logging.info(
+                f"Epoch {epoch+1}/{num_epochs} | Batch {batch_num} | Step {global_step} | "
+                f"Total Loss: {loss.item():.6f} | "
+                f"Seg Loss: {segment_loss.item():.6f} | "
+                f"LM Loss: {logit_loss.item():.6f} | "
+                f"CLS Loss: {cls_loss.item():.6f} | "
+                f"Avg Total: {avg_loss:.6f} | "
+                f"Avg Seg: {avg_segment_loss:.6f} | "
+                f"Avg LM: {avg_llm_loss:.6f} | "
+                f"Avg CLS: {avg_cls_loss:.6f}"
+            )
+            
             progress_bar.set_postfix(loss=avg_loss, llm_loss=avg_llm_loss, segment_loss=avg_segment_loss, cls_loss=avg_cls_loss)
         
         scheduler.step()
@@ -144,6 +152,7 @@ def train(
         checkpoint_path = os.path.join(save_dir, f"llm_seg_{epoch+1}")
         model.save_model(checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
+        logging.info(f"Checkpoint saved to: {checkpoint_path}")
 
 
 def parse_args():
@@ -180,6 +189,21 @@ if __name__ == "__main__":
     
     os.makedirs('logs', exist_ok=True)
     os.makedirs(args.save_dir, exist_ok=True)
+    
+    # Setup logging with batch loss file
+    log_file = os.path.join(args.save_dir, 'batch_losses.log')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ],
+        force=True  # Override any existing config
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Training started. Batch losses will be logged to: {log_file}")
+    logger.info(f"Arguments: {vars(args)}")
     
     device = args.device
     
