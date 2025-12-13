@@ -56,14 +56,16 @@ else:
         df = df.dropna()
         df = df.reset_index(drop=True)
         
+        # Return full dataframe - split handling is done in dataset class
+        # This maintains compatibility with original code
         if 'split' in df.columns:
-            train_df = df[df['split'] == 'train']
-            test_df = df[df['split'] == 'test']
+            train_df = df[df['split'] == 'train'].copy()
+            test_df = df[df['split'].isin(['test', 'val'])].copy() if 'test' in df['split'].values else pd.DataFrame()
         else:
             # If no split column, use 90/10 split
             train_size = int(len(df) * 0.9)
-            train_df = df.iloc[:train_size]
-            test_df = df.iloc[train_size:]
+            train_df = df.iloc[:train_size].copy()
+            test_df = df.iloc[train_size:].copy()
         
         return train_df, test_df
 
@@ -75,25 +77,81 @@ class PromptSegmentDataset(Dataset):
     def __init__(
         self,
         data_path,
-        annotation_path,
-        data_config,
-        image_processor,
-        tokenizer,
+        annotation_path=None,
+        data_config=None,
+        image_processor=None,
+        tokenizer=None,
         trainsize = 512,
-        mode = "train"
+        mode = "train",
+        specific_dataset=None  # New: filter by specific dataset (e.g., 'head_and_neck', 'prostate')
     ):
         self.data_path = data_path
         self.annotation_path = annotation_path
         self.tokenizer = tokenizer
         self.annotation_df = None
+        self.specific_dataset = specific_dataset
+        
+        # If annotation_path is None, load all CSVs from annotations/ directory
+        if annotation_path is None:
+            annotations_dir = os.path.join(data_path, 'annotations')
+            if os.path.exists(annotations_dir):
+                csv_files = [os.path.join(annotations_dir, f) for f in os.listdir(annotations_dir) if f.endswith('.csv')]
+                if len(csv_files) == 0:
+                    raise ValueError(f"No CSV files found in {annotations_dir}")
+                annotation_path = csv_files
+                print(f"Auto-detected {len(csv_files)} annotation file(s) from {annotations_dir}")
+            else:
+                raise ValueError(f"Annotations directory not found: {annotations_dir}. Please specify --ann_paths")
         
         # Handle multiple annotation paths
         if isinstance(annotation_path, str):
             annotation_path = [annotation_path]
         
+        # Load all annotations
         self.train_df, self.test_df = load_annotation(annotation_path)
+        
+        # Filter by specific dataset if requested
+        if specific_dataset is not None:
+            # Filter by dataset name in image_path or task column
+            if 'task' in self.train_df.columns:
+                self.train_df = self.train_df[self.train_df['task'] == specific_dataset]
+            else:
+                # Filter by image_path containing the dataset name
+                self.train_df = self.train_df[
+                    self.train_df['image_path'].str.contains(specific_dataset, case=False, na=False)
+                ]
+            if 'task' in self.test_df.columns:
+                self.test_df = self.test_df[self.test_df['task'] == specific_dataset]
+            else:
+                self.test_df = self.test_df[
+                    self.test_df['image_path'].str.contains(specific_dataset, case=False, na=False)
+                ]
+            print(f"Filtered to dataset: {specific_dataset} ({len(self.train_df)} train, {len(self.test_df)} test samples)")
+        
+        # Use split column if available, otherwise use train_df/test_df split
+        if 'split' in self.train_df.columns:
+            # Filter by split column
+            if mode == "train":
+                self.annotation_df = self.train_df[self.train_df['split'] == 'train'].copy()
+            elif mode == "val":
+                # Check if val split exists, otherwise use train for validation
+                if 'val' in self.train_df['split'].values:
+                    self.annotation_df = self.train_df[self.train_df['split'] == 'val'].copy()
+                else:
+                    # Use a portion of train for validation
+                    val_size = int(len(self.train_df) * 0.1)
+                    self.annotation_df = self.train_df.tail(val_size).copy()
+            else:  # test
+                self.annotation_df = self.test_df.copy()
+        else:
+            # Fallback: use train_df/test_df split
+            if mode == "train":
+                self.annotation_df = self.train_df
+            else:
+                self.annotation_df = self.test_df
+        
         self.trainsize = trainsize
-        self.annotation_df = self.train_df
+        print(f"Loaded {len(self.annotation_df)} samples for {mode} mode")
 
         self.IMAGE_TOKEN_INDEX = -200
         self.image_processor = image_processor
@@ -177,12 +235,23 @@ class PromptSegmentDataset(Dataset):
         # Handle image path - support data_v2 structure
         if 'image_path' in row:
             image_path = row['image_path']
+            # If image_path is relative and starts with task name (e.g., "head_and_neck/train_images/...")
             if not os.path.isabs(image_path):
-                image_path = os.path.join(self.data_path, image_path)
+                # Check if it already includes data_path
+                if not image_path.startswith(self.data_path):
+                    image_path = os.path.join(self.data_path, image_path)
         elif 'image_name' in row:
             # Construct path from image_name and split
             split = row.get('split', 'train')
-            task = row.get('task', 'head_and_neck')
+            task = row.get('task', None)
+            # Try to infer task from image_path if available
+            if task is None and 'image_path' in row:
+                # Extract task from image_path (e.g., "head_and_neck/train_images/..." -> "head_and_neck")
+                path_parts = row['image_path'].split('/')
+                if len(path_parts) > 0:
+                    task = path_parts[0]
+            if task is None:
+                task = 'head_and_neck'  # default
             image_name = row['image_name']
             image_path = os.path.join(self.data_path, task, f"{split}_images", image_name)
         else:
@@ -194,7 +263,8 @@ class PromptSegmentDataset(Dataset):
         if 'mask_path' in row:
             mask_path = row['mask_path']
             if not os.path.isabs(mask_path):
-                mask_path = os.path.join(self.data_path, mask_path)
+                if not mask_path.startswith(self.data_path):
+                    mask_path = os.path.join(self.data_path, mask_path)
         else:
             # Infer mask path from image path
             mask_path = re.sub(r"/(train|test|val)_images/", r"/\1_masks/", image_path)
@@ -269,26 +339,45 @@ def collate_fn(batch):
 
 def create_dataloader(
     data_path,
-    annotation_path,
-    data_config,
-    image_processor,
-    tokenizer,
+    annotation_path=None,
+    data_config=None,
+    image_processor=None,
+    tokenizer=None,
     batch_size=2,
-    mode="train"
+    mode="train",
+    specific_dataset=None  # New: filter by specific dataset
 ):
-    dataset = PromptSegmentDataset(
+    # Create train dataset
+    train_dataset = PromptSegmentDataset(
         data_path=data_path,
         annotation_path=annotation_path,
         data_config=data_config,
         image_processor=image_processor,
         tokenizer=tokenizer,
-        mode=mode
+        mode="train",
+        specific_dataset=specific_dataset
     )
-
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, 
-        [int(len(dataset) * 0.9), len(dataset) - int(len(dataset) * 0.9)]
+    
+    # Create val dataset
+    val_dataset = PromptSegmentDataset(
+        data_path=data_path,
+        annotation_path=annotation_path,
+        data_config=data_config,
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        mode="val",
+        specific_dataset=specific_dataset
     )
+    
+    # If no validation samples found, split train dataset
+    if len(val_dataset) == 0:
+        print("No validation split found in CSV. Splitting train dataset 90/10...")
+        train_size = int(len(train_dataset) * 0.9)
+        val_size = len(train_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            train_dataset, 
+            [train_size, val_size]
+        )
     
     train_dataloader = DataLoader(
         train_dataset, 

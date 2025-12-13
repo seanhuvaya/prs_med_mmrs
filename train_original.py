@@ -159,8 +159,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PRS-Med Training (Original Implementation)')
     parser.add_argument('--data_root', type=str, required=True,
                         help='Root directory containing data (e.g., data_v2/)')
-    parser.add_argument('--ann_paths', type=str, required=True,
-                        help='Comma-separated paths to annotation CSV files')
+    parser.add_argument('--ann_paths', type=str, default=None,
+                        help='Comma-separated paths to annotation CSV files. If not provided, auto-loads all CSVs from data_root/annotations/')
+    parser.add_argument('--specific_dataset', type=str, default=None,
+                        help='Filter to specific dataset (e.g., "head_and_neck", "prostate"). If None, loads all datasets.')
     parser.add_argument('--vlm_path', type=str, required=True,
                         help='Path to LLaVA-Med model (local path or Hugging Face ID like "microsoft/llava-med-v1.5-mistral-7b")')
     parser.add_argument('--sam_ckpt', type=str, required=True,
@@ -218,8 +220,13 @@ if __name__ == "__main__":
         sam_checkpoint_path=args.sam_ckpt
     )
 
-    # Parse annotation paths
-    ann_paths = [p.strip() for p in args.ann_paths.split(',')]
+    # Parse annotation paths (optional - will auto-detect if None)
+    ann_paths = None
+    if args.ann_paths:
+        ann_paths = [p.strip() for p in args.ann_paths.split(',')]
+        logger.info(f"Using specified annotation paths: {ann_paths}")
+    else:
+        logger.info("No annotation paths specified. Will auto-detect from data_root/annotations/")
     
     # Create dataloader
     dataloader = create_dataloader(
@@ -229,8 +236,14 @@ if __name__ == "__main__":
         image_processor=image_processor,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
-        mode="train"
+        mode="train",
+        specific_dataset=args.specific_dataset
     )
+    
+    if args.specific_dataset:
+        logger.info(f"Filtering to dataset: {args.specific_dataset}")
+    else:
+        logger.info("Loading all datasets from annotations directory")
 
     model.to(device)
 
