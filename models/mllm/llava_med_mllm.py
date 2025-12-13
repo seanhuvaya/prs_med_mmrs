@@ -227,11 +227,12 @@ class LLavaMedMLLM(nn.Module):
         self,
         images: List[Union[Image.Image, torch.Tensor]],
         questions: List[str],
-        max_new_tokens: int = 64,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
+        max_new_tokens: int = 48,
+        temperature: float = 0.2,
+        top_p: float = 0.8,
         top_k: int = 50,
-        repetition_penalty: float = 1.1,
+        repetition_penalty: float = 1.2,
+        no_repeat_ngram_size: int = 4,
     ) -> List[str]:
         """
         Generate free-form answers for question-only prompts.
@@ -244,46 +245,65 @@ class LLavaMedMLLM(nn.Module):
         """
         images = self._ensure_images(images)
 
-        texts_q = [
-            f"USER: <image>\n{q}\nASSISTANT:"
-            for q in questions
-        ]
-
-        inputs = self.processor(
-            images=images,
-            text=texts_q,
-            return_tensors="pt",
-            padding=True,
-        )
-
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        model_dtype = next(self.model.parameters()).dtype
-        for k, v in inputs.items():
-            if torch.is_floating_point(v):
-                inputs[k] = v.to(dtype=model_dtype)
-
-        # Ensure pad/eos tokens are set
         tokenizer = self.processor.tokenizer
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        generation = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=max(temperature, 1e-5),
-            top_p=top_p,
-            top_k=top_k,
-            repetition_penalty=repetition_penalty,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-        )
+        answers: List[str] = []
 
-        # Remove the prompt portion
-        prompt_len = inputs["input_ids"].shape[1]
-        gen_only = generation[:, prompt_len:]
-        texts = self.processor.batch_decode(gen_only, skip_special_tokens=True)
-        return [t.strip() for t in texts]
+        # Process each sample individually to respect chat template + image pairing
+        for img, q in zip(images, questions):
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": q},
+                    ],
+                }
+            ]
+
+            prompt = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+
+            inputs = self.processor(
+                text=[prompt],
+                images=[img],
+                return_tensors="pt",
+                padding=True,
+            )
+
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            model_dtype = next(self.model.parameters()).dtype
+            for k, v in inputs.items():
+                if torch.is_floating_point(v):
+                    inputs[k] = v.to(dtype=model_dtype)
+
+            generation = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature > 0,
+                temperature=max(temperature, 1e-5) if temperature > 0 else None,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+                length_penalty=1.0,
+                early_stopping=True,
+            )
+
+            # Remove the prompt portion
+            prompt_len = inputs["input_ids"].shape[1]
+            gen_only = generation[:, prompt_len:]
+            text = self.processor.batch_decode(gen_only, skip_special_tokens=True)[0]
+            answers.append(text.strip())
+
+        return answers
 
 
 if __name__ == "__main__":

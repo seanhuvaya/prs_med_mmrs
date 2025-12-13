@@ -96,6 +96,39 @@ mkdir -p weights
 
 ## 🏃 Quick Start
 
+### Using Original PRS-Med Implementation
+
+This repository includes an exact implementation matching the original PRS-Med paper (`train_original.py`). This uses the exact model architecture, loss functions, and training procedure from the original repository.
+
+**Prerequisites:**
+- The parent `PRS-Med` repository must be accessible (for LLaVA imports)
+- Or ensure LLaVA dependencies are installed
+
+**Training with Original Implementation:**
+```bash
+python train_original.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
+    --vlm_path /path/to/llava-med-v1.5-mistral-7b \
+    --sam_ckpt /path/to/tinysam_42.3.pth \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0 \
+    --save_dir ./checkpoints
+```
+
+**Key differences from `train_prs_med.py`:**
+- Uses exact `LLMSeg` model from original paper
+- Uses `PromptedMaskDecoder` from `mask_decoder_v5.py`
+- Uses `structure_loss` from original loss.py
+- Supports multiple annotation CSV files via `--ann_paths`
+- Works with `data_v2` folder structure (head_and_neck/, prostate/, etc.)
+
+**Data format for original implementation:**
+- CSV columns: `image_path` (or `image_name`), `question`, `answer`, `position` (optional), `split`
+- Supports `data_v2/` structure: `{task}/{split}_images/` and `{task}/{split}_masks/`
+- If using `image_name`, the script will construct paths automatically
+
 ### 1. Prepare Your Data
 
 Organize your data in the MMRS format:
@@ -116,7 +149,7 @@ CSV format should include columns: `image_path`, `mask_path`, `question`, `answe
 
 ### 2. Train the Model
 
-**Single GPU Training:**
+**Single GPU Training (New Implementation):**
 ```bash
 python train_prs_med.py \
     --data_root ./data \
