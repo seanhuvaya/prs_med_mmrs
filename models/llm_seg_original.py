@@ -56,7 +56,18 @@ class LLMSeg(nn.Module):
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
         )
         
-        model_name = get_model_name_from_path(model_path)
+        # Handle both Hugging Face model IDs and local paths
+        # Check if it's a Hugging Face model ID (contains '/' but not a local path)
+        is_hf_id = '/' in model_path and not os.path.isdir(model_path) and not os.path.isfile(model_path)
+        if is_hf_id:
+            # Hugging Face model ID (e.g., "microsoft/llava-med-v1.5-mistral-7b")
+            model_name = model_path.split('/')[-1]  # Extract model name from HF ID
+            print(f"Loading model from Hugging Face: {model_path}")
+        else:
+            # Local path
+            model_name = get_model_name_from_path(model_path)
+            print(f"Loading model from local path: {model_path}")
+        
         self.tokenizer, self.base_model, self.image_processor, self.context_len = load_pretrained_model(
             model_path,
             model_base,

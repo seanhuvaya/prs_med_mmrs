@@ -153,7 +153,7 @@ def parse_args():
     parser.add_argument('--ann_paths', type=str, required=True,
                         help='Comma-separated paths to annotation CSV files')
     parser.add_argument('--vlm_path', type=str, required=True,
-                        help='Path to LLaVA-Med model')
+                        help='Path to LLaVA-Med model (local path or Hugging Face ID like "microsoft/llava-med-v1.5-mistral-7b")')
     parser.add_argument('--sam_ckpt', type=str, required=True,
                         help='Path to TinySAM checkpoint')
     parser.add_argument('--sam_model_type', type=str, default='vit_t',

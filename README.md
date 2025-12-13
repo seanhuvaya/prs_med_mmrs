@@ -109,13 +109,17 @@ This repository includes an exact implementation matching the original PRS-Med p
 python train_original.py \
     --data_root /path/to/data_v2 \
     --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
-    --vlm_path /path/to/llava-med-v1.5-mistral-7b \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
     --sam_ckpt /path/to/tinysam_42.3.pth \
     --batch_size 4 \
     --epochs 20 \
     --device cuda:0 \
     --save_dir ./checkpoints
 ```
+
+**Note:** You can use either:
+- **Hugging Face model ID**: `microsoft/llava-med-v1.5-mistral-7b` (automatically downloads from HF)
+- **Local path**: `/path/to/llava-med-v1.5-mistral-7b` (if you've already downloaded it)
 
 **Key differences from `train_prs_med.py`:**
 - Uses exact `LLMSeg` model from original paper
