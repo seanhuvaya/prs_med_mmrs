@@ -9,6 +9,18 @@ uv run python -m train_original \
     --batch_size 8 \
     --epochs 20
 ```
+
+```bash
+uv run python -m infer_original \
+    --checkpoint checkpoints/llm_seg_10 \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --data_root /workspace/data/images_and_masks \
+    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
+    --split test \
+    --num_samples 10
+```
+
 ```bash
 curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
   | bash -s -- \
