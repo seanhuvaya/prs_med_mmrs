@@ -105,33 +105,6 @@ This repository includes an exact implementation matching the original PRS-Med p
 - Or ensure LLaVA dependencies are installed
 
 **Training with Original Implementation:**
-
-**Load all datasets (auto-detects all CSVs from annotations/):**
-```bash
-python train_original.py \
-    --data_root /path/to/data_v2 \
-    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
-    --sam_ckpt /path/to/tinysam_42.3.pth \
-    --batch_size 4 \
-    --epochs 20 \
-    --device cuda:0 \
-    --save_dir ./checkpoints
-```
-
-**Load specific dataset:**
-```bash
-python train_original.py \
-    --data_root /path/to/data_v2 \
-    --specific_dataset head_and_neck \
-    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
-    --sam_ckpt /path/to/tinysam_42.3.pth \
-    --batch_size 4 \
-    --epochs 20 \
-    --device cuda:0 \
-    --save_dir ./checkpoints
-```
-
-**Manually specify annotation paths:**
 ```bash
 python train_original.py \
     --data_root /path/to/data_v2 \
@@ -144,9 +117,7 @@ python train_original.py \
     --save_dir ./checkpoints
 ```
 
-**Note:** 
-- **Auto-detection**: If `--ann_paths` is not provided, automatically loads all CSV files from `data_root/annotations/`
-- **Dataset filtering**: Use `--specific_dataset` to filter to a specific dataset (e.g., `head_and_neck`, `prostate`)
+**Note:** You can use either:
 - **Hugging Face model ID**: `microsoft/llava-med-v1.5-mistral-7b` (automatically downloads from HF)
 - **Local path**: `/path/to/llava-med-v1.5-mistral-7b` (if you've already downloaded it)
 

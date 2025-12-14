@@ -10,7 +10,6 @@ import random
 import numpy as np
 import traceback
 import sys
-import logging
 
 # Import components
 from data.dataset import PRSMedDataLoader  # optional, kept for compatibility
@@ -417,21 +416,6 @@ def main():
     checkpoint_dir = os.path.join(args.checkpoint_dir, f"training_{timestamp}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Setup logging for batch losses
-    log_file = os.path.join(checkpoint_dir, 'batch_losses.log')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ],
-        force=True
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Training started. Batch losses will be logged to: {log_file}")
-    logger.info(f"Arguments: {vars(args)}")
-
     print(f"✓ Checkpoint directory: {checkpoint_dir}")
     print(f"  Absolute path: {os.path.abspath(checkpoint_dir)}")
 
@@ -627,28 +611,14 @@ def main():
             epoch_loss_seg += loss_dict["loss_seg"].item() * args.gradient_accumulation_steps
             epoch_loss_txt += loss_dict["loss_txt"].item() * args.gradient_accumulation_steps
 
-            # Calculate batch losses
-            batch_loss_total = loss_total.item() * args.gradient_accumulation_steps
-            batch_loss_seg = loss_dict['loss_seg'].item()
-            batch_loss_txt = loss_dict['loss_txt'].item()
-            
-            # Log every batch to file
-            global_step = epoch * len(train_loader) + batch_idx + 1
-            logger.info(
-                f"Epoch {epoch+1}/{args.num_epochs} | Batch {batch_idx+1} | Step {global_step} | "
-                f"Total Loss: {batch_loss_total:.6f} | "
-                f"Seg Loss: {batch_loss_seg:.6f} | "
-                f"Text Loss: {batch_loss_txt:.6f}"
-            )
-            
             if batch_idx % 10 == 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 print(
                     f"Epoch {epoch+1}, Batch {batch_idx}, "
-                    f"Total: {batch_loss_total:.4f}, "
-                    f"Seg: {batch_loss_seg:.4f}, "
-                    f"Text: {batch_loss_txt:.4f}"
+                    f"Total: {loss_total.item() * args.gradient_accumulation_steps:.4f}, "
+                    f"Seg: {loss_dict['loss_seg'].item():.4f}, "
+                    f"Text: {loss_dict['loss_txt'].item():.4f}"
                 )
 
         if len(train_loader) % args.gradient_accumulation_steps != 0:
@@ -672,13 +642,6 @@ def main():
             f"Total: {avg_train_total:.4f}, "
             f"Seg: {avg_train_seg:.4f}, "
             f"Text: {avg_train_txt:.4f}, "
-            f"Time: {epoch_time:.2f}s"
-        )
-        logger.info(
-            f"Epoch {epoch+1}/{args.num_epochs} - TRAIN - "
-            f"Avg Total: {avg_train_total:.6f} | "
-            f"Avg Seg: {avg_train_seg:.6f} | "
-            f"Avg Text: {avg_train_txt:.6f} | "
             f"Time: {epoch_time:.2f}s"
         )
 
@@ -757,12 +720,6 @@ def main():
             f"Seg: {avg_val_seg:.4f}, "
             f"Text: {avg_val_txt:.4f}"
         )
-        logger.info(
-            f"Epoch {epoch+1}/{args.num_epochs} - VALIDATION - "
-            f"Avg Total: {avg_val_total:.6f} | "
-            f"Avg Seg: {avg_val_seg:.6f} | "
-            f"Avg Text: {avg_val_txt:.6f}"
-        )
 
         # Checkpoints
         if checkpoint_dir is not None:
@@ -780,7 +737,6 @@ def main():
 
     print("Training complete!")
     print(f"Best validation loss: {best_val_loss:.4f}")
-    logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
     if checkpoint_dir is not None:
         print(f"Checkpoints in: {checkpoint_dir}")
         files = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pth")]

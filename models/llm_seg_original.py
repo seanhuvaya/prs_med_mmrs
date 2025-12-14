@@ -1,15 +1,10 @@
-import sys
 import os
 import math
 import torch
 import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
-# Add parent PRS-Med repo to path to import LLaVA
-parent_repo = os.path.join(os.path.dirname(__file__), '../../PRS-Med')
-if os.path.exists(parent_repo):
-    sys.path.insert(0, parent_repo)
-
+# Import from local llava module (self-contained)
 from llava.model.builder import load_pretrained_model
 from llava.mm_utils import get_model_name_from_path
 from llava.utils import disable_torch_init

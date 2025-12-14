@@ -18,8 +18,14 @@ from models.llm_seg_original import build_llm_seg
 from data.dataset_original import create_dataloader
 from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss
 
-# Setup logging - will be configured in main() with proper log file path
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/training.log'),
+        logging.StreamHandler()
+    ]
+)
 
 def count_train_parameters(model):
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
@@ -120,22 +126,8 @@ def train(
             avg_llm_loss = total_llm_loss / (progress_bar.n + 1)
             avg_segment_loss = total_segment_loss / (progress_bar.n + 1)
             avg_cls_loss = total_cls_loss / (progress_bar.n + 1)
-            
-            # Log every batch to file
-            batch_num = progress_bar.n + 1
-            global_step = epoch * len(dataloader) + batch_num
-            logging.info(
-                f"Epoch {epoch+1}/{num_epochs} | Batch {batch_num} | Step {global_step} | "
-                f"Total Loss: {loss.item():.6f} | "
-                f"Seg Loss: {segment_loss.item():.6f} | "
-                f"LM Loss: {logit_loss.item():.6f} | "
-                f"CLS Loss: {cls_loss.item():.6f} | "
-                f"Avg Total: {avg_loss:.6f} | "
-                f"Avg Seg: {avg_segment_loss:.6f} | "
-                f"Avg LM: {avg_llm_loss:.6f} | "
-                f"Avg CLS: {avg_cls_loss:.6f}"
-            )
-            
+            if progress_bar.n % 1000 == 0:
+                logging.info(f"Epoch [{epoch+1}/{num_epochs}], Step [{progress_bar.n}], Loss: {avg_loss}, LLM Loss: {avg_llm_loss}, Segment Loss: {avg_segment_loss}, Cls Loss: {avg_cls_loss}")
             progress_bar.set_postfix(loss=avg_loss, llm_loss=avg_llm_loss, segment_loss=avg_segment_loss, cls_loss=avg_cls_loss)
         
         scheduler.step()
@@ -152,17 +144,14 @@ def train(
         checkpoint_path = os.path.join(save_dir, f"llm_seg_{epoch+1}")
         model.save_model(checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
-        logging.info(f"Checkpoint saved to: {checkpoint_path}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PRS-Med Training (Original Implementation)')
     parser.add_argument('--data_root', type=str, required=True,
                         help='Root directory containing data (e.g., data_v2/)')
-    parser.add_argument('--ann_paths', type=str, default=None,
-                        help='Comma-separated paths to annotation CSV files. If not provided, auto-loads all CSVs from data_root/annotations/')
-    parser.add_argument('--specific_dataset', type=str, default=None,
-                        help='Filter to specific dataset (e.g., "head_and_neck", "prostate"). If None, loads all datasets.')
+    parser.add_argument('--ann_paths', type=str, required=True,
+                        help='Comma-separated paths to annotation CSV files')
     parser.add_argument('--vlm_path', type=str, required=True,
                         help='Path to LLaVA-Med model (local path or Hugging Face ID like "microsoft/llava-med-v1.5-mistral-7b")')
     parser.add_argument('--sam_ckpt', type=str, required=True,
@@ -192,21 +181,6 @@ if __name__ == "__main__":
     os.makedirs('logs', exist_ok=True)
     os.makedirs(args.save_dir, exist_ok=True)
     
-    # Setup logging with batch loss file
-    log_file = os.path.join(args.save_dir, 'batch_losses.log')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ],
-        force=True  # Override any existing config
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Training started. Batch losses will be logged to: {log_file}")
-    logger.info(f"Arguments: {vars(args)}")
-    
     device = args.device
     
     # Build model
@@ -220,13 +194,8 @@ if __name__ == "__main__":
         sam_checkpoint_path=args.sam_ckpt
     )
 
-    # Parse annotation paths (optional - will auto-detect if None)
-    ann_paths = None
-    if args.ann_paths:
-        ann_paths = [p.strip() for p in args.ann_paths.split(',')]
-        logger.info(f"Using specified annotation paths: {ann_paths}")
-    else:
-        logger.info("No annotation paths specified. Will auto-detect from data_root/annotations/")
+    # Parse annotation paths
+    ann_paths = [p.strip() for p in args.ann_paths.split(',')]
     
     # Create dataloader
     dataloader = create_dataloader(
@@ -236,14 +205,8 @@ if __name__ == "__main__":
         image_processor=image_processor,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
-        mode="train",
-        specific_dataset=args.specific_dataset
+        mode="train"
     )
-    
-    if args.specific_dataset:
-        logger.info(f"Filtering to dataset: {args.specific_dataset}")
-    else:
-        logger.info("Loading all datasets from annotations directory")
 
     model.to(device)
 
