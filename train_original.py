@@ -44,7 +44,8 @@ def evaluate(model, val_loader, device="cuda:0"):
         mask_tensor = batch['mask_tensor'].to(device)
         image_sam_tensor = batch['image_sam'].to(device)
         with torch.no_grad():
-            outputs, _, _ = model(
+            # During evaluation, model returns (final_mask, output) - only 2 values
+            outputs, _ = model(
                 input_ids=input_ids,
                 image_tensor_for_vlm=image_tensor,
                 image_tensor_for_image_enc=image_sam_tensor,

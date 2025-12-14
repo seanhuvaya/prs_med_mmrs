@@ -1,6 +1,15 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
 ## Run Train script
 ```bash
+uv run python -m train_original \
+    --data_root /workspace/data/images_and_masks \
+    --ann_paths /workspace/data/annotations/head_and_neck.csv,/workspace/data/annotations/prostate.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --batch_size 8 \
+    --epochs 20
+```
+```bash
 curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
   | bash -s -- \
   YOUR_AWS_ACCESS_KEY_ID \
