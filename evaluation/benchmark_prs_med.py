@@ -74,33 +74,74 @@ class HFJudge:
     - Each agent evaluated with 3 chain-of-thought prompts that must answer strictly 'yes' or 'no'.
     """
 
-    def __init__(self, model_name: str, device: torch.device, max_new_tokens: int = 8):
+    def __init__(self, model_name: str, device: torch.device, max_new_tokens: int = 8, use_auth_token: bool = None):
         self.model_name = model_name
         self.device = device
         self.max_new_tokens = max_new_tokens
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                token=use_auth_token,
+                trust_remote_code=True,  # Some models require this
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load tokenizer for '{model_name}'. "
+                f"Error: {str(e)}\n"
+                f"Possible solutions:\n"
+                f"  1. Check if the model name is correct\n"
+                f"  2. Run 'huggingface-cli login' if the model requires authentication\n"
+                f"  3. Ensure transformers>=4.37.0 is installed\n"
+                f"  4. Check your internet connection"
+            ) from e
+        
         # Some chat models require padding side to be left for generation
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Set pad_token_id in model config to avoid warnings during generation
+        if hasattr(self.model, 'config'):
+            if self.model.config.pad_token_id is None:
+                self.model.config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+            # Also set in generation config if it exists
+            if hasattr(self.model, 'generation_config') and self.model.generation_config is not None:
+                if self.model.generation_config.pad_token_id is None:
+                    self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
         
         # Detect model type for chat template handling
         self.is_qwen = "qwen" in model_name.lower()
         self.is_llama = "llama" in model_name.lower()
 
         # Load model with appropriate device handling
-        if device.type == "cuda":
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",  # Automatically handles multi-GPU if available
-            )
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.float32,
-            )
-            self.model.to(device)
+        try:
+            if device.type == "cuda":
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",  # Automatically handles multi-GPU if available
+                    token=use_auth_token,
+                    trust_remote_code=True,  # Some models require this
+                )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float32,
+                    token=use_auth_token,
+                    trust_remote_code=True,
+                )
+                self.model.to(device)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load model '{model_name}'. "
+                f"Error: {str(e)}\n"
+                f"Possible solutions:\n"
+                f"  1. Check if the model name is correct\n"
+                f"  2. Run 'huggingface-cli login' if the model requires authentication\n"
+                f"  3. Ensure transformers>=4.37.0 is installed\n"
+                f"  4. Check your internet connection\n"
+                f"  5. Ensure you have sufficient disk space and memory"
+            ) from e
         self.model.eval()
 
     @torch.no_grad()
@@ -132,11 +173,28 @@ class HFJudge:
             # For CPU, ensure inputs are on CPU
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
-        output_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-        )
+        # Suppress pad_token_id warnings by explicitly setting it in generate call
+        generation_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": False,
+        }
+        
+        # Set pad_token_id if not already set in model config
+        if hasattr(self.model, 'config') and self.model.config.pad_token_id is not None:
+            generation_kwargs["pad_token_id"] = self.model.config.pad_token_id
+        elif self.tokenizer.pad_token_id is not None:
+            generation_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+        else:
+            generation_kwargs["pad_token_id"] = self.tokenizer.eos_token_id
+        
+        # Suppress warnings for this specific call
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*pad_token_id.*")
+            output_ids = self.model.generate(
+                **inputs,
+                **generation_kwargs,
+            )
         # Take only the newly generated tokens
         gen_ids = output_ids[0, inputs["input_ids"].shape[1]:]
         text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)

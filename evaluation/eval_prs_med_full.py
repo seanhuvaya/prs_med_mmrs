@@ -39,6 +39,7 @@ def evaluate_reasoning(
     qwen_model_name: str,
     llama_model_name: str,
     device: str = "cuda",
+    use_auth_token: bool = None,
 ) -> Tuple[float, float, float, float, List[float], List[float]]:
     """
     Evaluate position reasoning EXACTLY as in the PRS-Med paper:
@@ -64,7 +65,7 @@ def evaluate_reasoning(
     # ---------------------- Qwen 3 Agent ---------------------- #
     print("\nLoading Qwen 3 judge model from HuggingFace:")
     print(f"  {qwen_model_name}")
-    qwen_judge = HFJudge(qwen_model_name, device_t)
+    qwen_judge = HFJudge(qwen_model_name, device_t, use_auth_token=use_auth_token)
 
     qwen_acc, qwen_std, qwen_per_prompt = run_agent_position_benchmark(
         qwen_judge,
@@ -76,7 +77,7 @@ def evaluate_reasoning(
     # ---------------------- Llama 3.1 Agent ---------------------- #
     print("\nLoading Llama 3.1 judge model from HuggingFace:")
     print(f"  {llama_model_name}")
-    llama_judge = HFJudge(llama_model_name, device_t)
+    llama_judge = HFJudge(llama_model_name, device_t, use_auth_token=use_auth_token)
 
     llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
         llama_judge,
@@ -118,13 +119,30 @@ def parse_args():
         "--qwen_model_name",
         type=str,
         default="Qwen/Qwen2-1.5B-Instruct",
-        help="Hugging Face model name for Qwen 3 judge (as per PRS-Med paper)",
+        help="Hugging Face model name for Qwen judge (as per PRS-Med paper). "
+             "Examples: 'Qwen/Qwen2-1.5B-Instruct', 'Qwen/Qwen2-7B-Instruct'. "
+             "Note: Some models may require authentication. Run 'huggingface-cli login' first.",
     )
     parser.add_argument(
         "--llama_model_name",
         type=str,
         default="meta-llama/Meta-Llama-3.1-8B-Instruct",
-        help="Hugging Face model name for Llama 3.1 judge (as per PRS-Med paper)",
+        help="Hugging Face model name for Llama judge (as per PRS-Med paper). "
+             "Examples: 'meta-llama/Meta-Llama-3.1-8B-Instruct', 'meta-llama/Llama-3-8B-Instruct'. "
+             "Note: Llama models require authentication. Run 'huggingface-cli login' and accept the model's terms first.",
+    )
+    parser.add_argument(
+        "--use_auth_token",
+        action="store_true",
+        help="Use Hugging Face authentication token (required for gated models). "
+             "Alternatively, run 'huggingface-cli login' before running this script.",
+    )
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="Hugging Face token as string (alternative to --use_auth_token). "
+             "Can also be set via HF_TOKEN environment variable.",
     )
     return parser.parse_args()
 
@@ -135,10 +153,29 @@ def main():
 
     if not os.path.exists(results_csv):
         raise FileNotFoundError(f"results CSV not found: {results_csv}")
+    
+    # Handle authentication token
+    use_auth_token = None
+    if args.hf_token:
+        use_auth_token = args.hf_token
+    elif args.use_auth_token:
+        # Try to get token from environment or huggingface-cli
+        use_auth_token = os.getenv("HF_TOKEN") or True
+    else:
+        # Try environment variable as fallback
+        use_auth_token = os.getenv("HF_TOKEN")
 
     print("=" * 60)
     print("PRS-Med-MMRS Evaluation (Segmentation + Position Reasoning)")
     print("=" * 60)
+    
+    # Check if authentication might be needed
+    if use_auth_token is None:
+        print("\nNote: If you encounter authentication errors, you may need to:")
+        print("  1. Run 'huggingface-cli login' to authenticate")
+        print("  2. Accept the model's terms on Hugging Face Hub")
+        print("  3. Use --use_auth_token or --hf_token argument")
+        print("  4. Or set HF_TOKEN environment variable\n")
 
     # ---------------------- Segmentation Metrics ---------------------- #
     print("\n[1/2] Evaluating segmentation (mDice, mIoU)...")
@@ -155,6 +192,7 @@ def main():
         qwen_model_name=args.qwen_model_name,
         llama_model_name=args.llama_model_name,
         device=args.device,
+        use_auth_token=use_auth_token,
     )
 
     print("\n" + "=" * 60)
