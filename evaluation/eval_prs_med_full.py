@@ -37,13 +37,23 @@ def load_text_triplets(results_csv: str) -> Tuple[List[str], List[str], List[str
 def evaluate_reasoning(
     results_csv: str,
     qwen_model_name: str,
+    llama_model_name: str,
     device: str = "cuda",
-) -> Tuple[float, float, List[float]]:
+) -> Tuple[float, float, float, float, List[float], List[float]]:
     """
-    Evaluate position reasoning as in the PRS-Med paper using a Hugging Face LLM judge.
-
-    - Uses Qwen (or any HF model) as the judge.
-    - Follows the three chain-of-thought prompts in benchmark_prs_med.py.
+    Evaluate position reasoning EXACTLY as in the PRS-Med paper:
+    - Uses ensemble of TWO judges: Qwen 3 and Llama 3.1
+    - Each judge uses three chain-of-thought prompts
+    - Final accuracy = mean of the two agents' accuracies
+    
+    Returns:
+        final_acc: Mean of Qwen and Llama accuracies (paper's final metric)
+        qwen_acc: Qwen agent accuracy
+        qwen_std: Qwen agent std dev over prompts
+        llama_acc: Llama agent accuracy
+        llama_std: Llama agent std dev over prompts
+        qwen_per_prompt: Qwen's per-prompt accuracies (3 values)
+        llama_per_prompt: Llama's per-prompt accuracies (3 values)
     """
     device_t = torch.device(device if torch.cuda.is_available() or device == "cpu" else "cpu")
 
@@ -51,17 +61,35 @@ def evaluate_reasoning(
 
     print(f"\nLoaded {len(questions)} QA triplets from {results_csv} for reasoning benchmark")
 
-    print(f"\nLoading judge model from HuggingFace: {qwen_model_name}")
-    judge = HFJudge(qwen_model_name, device_t)
+    # ---------------------- Qwen 3 Agent ---------------------- #
+    print("\nLoading Qwen 3 judge model from HuggingFace:")
+    print(f"  {qwen_model_name}")
+    qwen_judge = HFJudge(qwen_model_name, device_t)
 
-    agent_acc, agent_std, per_prompt_acc = run_agent_position_benchmark(
-        judge,
+    qwen_acc, qwen_std, qwen_per_prompt = run_agent_position_benchmark(
+        qwen_judge,
         questions,
         gt_texts,
         pred_texts,
     )
 
-    return agent_acc, agent_std, per_prompt_acc
+    # ---------------------- Llama 3.1 Agent ---------------------- #
+    print("\nLoading Llama 3.1 judge model from HuggingFace:")
+    print(f"  {llama_model_name}")
+    llama_judge = HFJudge(llama_model_name, device_t)
+
+    llama_acc, llama_std, llama_per_prompt = run_agent_position_benchmark(
+        llama_judge,
+        questions,
+        gt_texts,
+        pred_texts,
+    )
+
+    # ---------------------- Ensemble (Paper's Final Metric) ---------------------- #
+    # Final result: mean of agents' accuracies (as per PRS-Med paper)
+    final_acc = (qwen_acc + llama_acc) / 2.0
+
+    return final_acc, qwen_acc, qwen_std, llama_acc, llama_std, qwen_per_prompt, llama_per_prompt
 
 
 def parse_args():
@@ -90,7 +118,13 @@ def parse_args():
         "--qwen_model_name",
         type=str,
         default="Qwen/Qwen2-1.5B-Instruct",
-        help="Hugging Face model name for the Qwen-style judge (or any compatible chat model)",
+        help="Hugging Face model name for Qwen 3 judge (as per PRS-Med paper)",
+    )
+    parser.add_argument(
+        "--llama_model_name",
+        type=str,
+        default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        help="Hugging Face model name for Llama 3.1 judge (as per PRS-Med paper)",
     )
     return parser.parse_args()
 
@@ -115,18 +149,29 @@ def main():
     print(f"  mIoU:  {mean_iou:.4f}")
 
     # ---------------------- Reasoning Metrics ------------------------- #
-    print("\n[2/2] Evaluating position reasoning with LLM judge...")
-    agent_acc, agent_std, per_prompt_acc = evaluate_reasoning(
+    print("\n[2/2] Evaluating position reasoning with LLM judge ensemble (PRS-Med paper exact)...")
+    final_acc, qwen_acc, qwen_std, llama_acc, llama_std, qwen_per_prompt, llama_per_prompt = evaluate_reasoning(
         results_csv,
         qwen_model_name=args.qwen_model_name,
+        llama_model_name=args.llama_model_name,
         device=args.device,
     )
 
-    print("\nPosition Reasoning Metrics (PRS-Med style, single judge):")
-    print(f"  Accuracy (mean over 3 prompts): {agent_acc:.4f}")
-    print(f"  Std over prompts:              {agent_std:.4f}")
-    for i, acc in enumerate(per_prompt_acc):
-        print(f"  Prompt {i+1} accuracy:          {acc:.4f}")
+    print("\n" + "=" * 60)
+    print("Position Reasoning Benchmark (PRS-Med Paper - Exact Match)")
+    print("Each agent: mean ± std over 3 prompt variants")
+    print(f"  Qwen 3:     {qwen_acc:.4f} ± {qwen_std:.4f}")
+    print(f"  Llama 3.1:  {llama_acc:.4f} ± {llama_std:.4f}")
+    print(f"  Final Acc (Ensemble): {final_acc:.4f}")
+    print("=" * 60)
+    
+    print("\nPer-Prompt Accuracies:")
+    print("  Qwen 3:")
+    for i, acc in enumerate(qwen_per_prompt):
+        print(f"    Prompt {i+1}: {acc:.4f}")
+    print("  Llama 3.1:")
+    for i, acc in enumerate(llama_per_prompt):
+        print(f"    Prompt {i+1}: {acc:.4f}")
 
     # ---------------------- Save Summary ------------------------------ #
     if args.output_path is not None:
@@ -138,12 +183,19 @@ def main():
                     "results_csv": results_csv,
                     "mean_dice": mean_dice,
                     "mean_iou": mean_iou,
-                    "reasoning_acc": agent_acc,
-                    "reasoning_std": agent_std,
-                    "prompt1_acc": per_prompt_acc[0] if len(per_prompt_acc) > 0 else np.nan,
-                    "prompt2_acc": per_prompt_acc[1] if len(per_prompt_acc) > 1 else np.nan,
-                    "prompt3_acc": per_prompt_acc[2] if len(per_prompt_acc) > 2 else np.nan,
-                    "judge_model": args.qwen_model_name,
+                    "final_reasoning_acc": final_acc,  # Ensemble accuracy (paper's metric)
+                    "qwen_acc": qwen_acc,
+                    "qwen_std": qwen_std,
+                    "llama_acc": llama_acc,
+                    "llama_std": llama_std,
+                    "qwen_prompt1_acc": qwen_per_prompt[0] if len(qwen_per_prompt) > 0 else np.nan,
+                    "qwen_prompt2_acc": qwen_per_prompt[1] if len(qwen_per_prompt) > 1 else np.nan,
+                    "qwen_prompt3_acc": qwen_per_prompt[2] if len(qwen_per_prompt) > 2 else np.nan,
+                    "llama_prompt1_acc": llama_per_prompt[0] if len(llama_per_prompt) > 0 else np.nan,
+                    "llama_prompt2_acc": llama_per_prompt[1] if len(llama_per_prompt) > 1 else np.nan,
+                    "llama_prompt3_acc": llama_per_prompt[2] if len(llama_per_prompt) > 2 else np.nan,
+                    "qwen_model": args.qwen_model_name,
+                    "llama_model": args.llama_model_name,
                 }
             ]
         )

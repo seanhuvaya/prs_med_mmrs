@@ -66,8 +66,9 @@ def iou_score(pred_mask: torch.Tensor, true_mask: torch.Tensor, smooth: float = 
 
 class HFJudge:
     """
-    Simple HuggingFace-based LLM judge.
-
+    HuggingFace-based LLM judge for PRS-Med position reasoning benchmark.
+    
+    Supports both Qwen and Llama models with proper chat template handling.
     Used to implement the PRS-Med position reasoning benchmark:
     - Two agents: Qwen 3 and Llama 3.1.
     - Each agent evaluated with 3 chain-of-thought prompts that must answer strictly 'yes' or 'no'.
@@ -82,20 +83,55 @@ class HFJudge:
         # Some chat models require padding side to be left for generation
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Detect model type for chat template handling
+        self.is_qwen = "qwen" in model_name.lower()
+        self.is_llama = "llama" in model_name.lower()
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-        )
-        self.model.to(device)
+        # Load model with appropriate device handling
+        if device.type == "cuda":
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                device_map="auto",  # Automatically handles multi-GPU if available
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float32,
+            )
+            self.model.to(device)
         self.model.eval()
 
     @torch.no_grad()
     def __call__(self, prompt: str) -> str:
         """
         Run the judge on a single prompt and return the raw generated text.
+        Handles chat templates for Qwen and Llama models.
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
+        # Use chat template if available (for Qwen/Llama chat models)
+        if hasattr(self.tokenizer, "apply_chat_template") and (self.is_qwen or self.is_llama):
+            messages = [{"role": "user", "content": prompt}]
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            inputs = self.tokenizer(formatted_prompt, return_tensors="pt")
+        else:
+            # Fallback to direct tokenization
+            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True)
+        
+        # Move inputs to device
+        # Note: When using device_map="auto", the model handles device placement,
+        # but inputs still need to be on a CUDA device for proper handling
+        if self.device.type == "cuda":
+            # For CUDA, move to device (model will handle placement if using device_map="auto")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        else:
+            # For CPU, ensure inputs are on CPU
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        
         output_ids = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
