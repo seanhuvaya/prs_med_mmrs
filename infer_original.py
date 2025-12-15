@@ -140,6 +140,46 @@ def load_image_for_vlm(image_path, image_processor, config):
     return image_tensor.to(torch.float16)
 
 
+def save_visualization_triplet(image_path, mask_path, pred_mask_path, save_path):
+    """Save a side-by-side visualization of image, GT mask, and predicted mask."""
+    try:
+        # Load base image
+        img = Image.open(image_path).convert("RGB")
+
+        # Load GT mask (if available)
+        gt_mask = None
+        if mask_path is not None and os.path.exists(mask_path):
+            gt_mask = Image.open(mask_path)
+
+        # Load predicted mask
+        pred_mask = Image.open(pred_mask_path)
+
+        # Create figure
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+        axes[0].imshow(img)
+        axes[0].set_title("Image")
+        axes[0].axis("off")
+
+        if gt_mask is not None:
+            axes[1].imshow(gt_mask, cmap="gray")
+            axes[1].set_title("GT Mask")
+        else:
+            axes[1].imshow(np.zeros((img.height, img.width)), cmap="gray")
+            axes[1].set_title("GT Mask (missing)")
+        axes[1].axis("off")
+
+        axes[2].imshow(pred_mask, cmap="gray")
+        axes[2].set_title("Pred Mask")
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        fig.savefig(save_path, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        print(f"Failed to save visualization for {image_path}: {e}")
+
+
 def process_prompt(prompt, tokenizer):
     """Process prompt for VLM"""
     prompt_for_vlm = "<image>\n" + f"### User: {prompt} \n"
@@ -264,8 +304,10 @@ def main():
     # Setup output directory
     output_dir = Path(args.output_dir)
     masks_dir = output_dir / "pred_masks"
+    triplets_dir = output_dir / "triplets"
     output_dir.mkdir(parents=True, exist_ok=True)
     masks_dir.mkdir(parents=True, exist_ok=True)
+    triplets_dir.mkdir(parents=True, exist_ok=True)
     
     # Load model
     model, tokenizer, image_processor, config = load_model(args)
@@ -339,6 +381,16 @@ def main():
             mask_filename = f"pred_mask_{idx:05d}.png"
             mask_save_path = masks_dir / mask_filename
             cv2.imwrite(str(mask_save_path), mask_uint8)
+
+            # Save side-by-side visualization (image, GT mask, pred mask)
+            triplet_filename = f"triplet_{idx:05d}.png"
+            triplet_save_path = triplets_dir / triplet_filename
+            save_visualization_triplet(
+                image_path=image_path,
+                mask_path=mask_path,
+                pred_mask_path=str(mask_save_path),
+                save_path=str(triplet_save_path),
+            )
             
             # Store results
             results.append({
@@ -346,6 +398,7 @@ def main():
                 'image_path': image_path,
                 'mask_path': mask_path,
                 'pred_mask_path': str(mask_save_path),
+                'triplet_path': str(triplet_save_path),
                 'question': prompt,
                 'answer': row.get('answer', ''),
                 'pred_answer': text_output,
