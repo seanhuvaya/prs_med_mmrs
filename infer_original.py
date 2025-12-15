@@ -136,7 +136,8 @@ def load_image_for_vlm(image_path, image_processor, config):
         image_processor,
         config
     )
-    return image_tensor.squeeze(0).to(torch.float16)
+    # Keep batch dimension (1, C, H, W) for CLIP vision tower
+    return image_tensor.to(torch.float16)
 
 
 def process_prompt(prompt, tokenizer):
