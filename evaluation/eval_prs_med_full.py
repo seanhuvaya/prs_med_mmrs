@@ -2,6 +2,7 @@ import argparse
 import os
 from pathlib import Path
 from typing import List, Tuple
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -213,7 +214,18 @@ def main():
 
     # ---------------------- Save Summary ------------------------------ #
     if args.output_path is not None:
+        # Add timestamp prefix if output_path is a directory or doesn't have timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = Path(args.output_path)
+        
+        # If it's a directory, create a timestamped file inside it
+        if out_path.is_dir() or (not out_path.suffix and not out_path.exists()):
+            out_path = out_path / f"eval_results_{timestamp}.csv"
+        # If it's a file path but doesn't have timestamp, add it
+        elif not any(char.isdigit() for char in out_path.stem[-15:]):  # Check if last 15 chars have digits
+            # Insert timestamp before extension
+            out_path = out_path.parent / f"{out_path.stem}_{timestamp}{out_path.suffix}"
+        
         out_path.parent.mkdir(parents=True, exist_ok=True)
         df = pd.DataFrame(
             [

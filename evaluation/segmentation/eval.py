@@ -2,6 +2,7 @@ import os
 import argparse
 import tqdm
 import sys
+from datetime import datetime
 
 import numpy as np
 import cv2
@@ -17,6 +18,16 @@ from .utils import *
 
 
 def evaluate(opt, args):
+    # Add timestamp prefix to result_path
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_result_path = opt.Eval.result_path
+    # Add timestamp prefix if not already present
+    if not any(char.isdigit() for char in os.path.basename(base_result_path)[:15]):
+        opt.Eval.result_path = os.path.join(
+            os.path.dirname(base_result_path),
+            f"seg_eval_{timestamp}_{os.path.basename(base_result_path)}"
+        )
+    
     if os.path.isdir(opt.Eval.result_path) is False:
         os.makedirs(opt.Eval.result_path)
 

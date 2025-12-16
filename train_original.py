@@ -9,11 +9,6 @@ from tqdm import tqdm
 import logging
 import torch.nn.functional as F
 
-# Add parent PRS-Med repo to path
-parent_repo = os.path.join(os.path.dirname(__file__), '../PRS-Med')
-if os.path.exists(parent_repo):
-    sys.path.insert(0, parent_repo)
-
 from models.llm_seg_original import build_llm_seg
 from data.dataset_original import create_dataloader
 from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss

@@ -301,8 +301,13 @@ def infer_single(
 def main():
     args = parse_args()
     
-    # Setup output directory
-    output_dir = Path(args.output_dir)
+    # Generate timestamp prefix
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Setup output directory with timestamp prefix
+    base_output_dir = Path(args.output_dir)
+    output_dir = base_output_dir / f"inference_{timestamp}"
     masks_dir = output_dir / "pred_masks"
     triplets_dir = output_dir / "triplets"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -410,13 +415,14 @@ def main():
             traceback.print_exc()
             continue
     
-    # Save results CSV
+    # Save results CSV with timestamp prefix
     results_df = pd.DataFrame(results)
-    csv_path = output_dir / f"results_{args.split}.csv"
+    csv_path = output_dir / f"results_{args.split}_{timestamp}.csv"
     results_df.to_csv(csv_path, index=False)
     print(f"\n✓ Results saved to: {csv_path}")
     print(f"✓ Processed {len(results)} samples")
     print(f"✓ Masks saved to: {masks_dir}")
+    print(f"✓ Output directory: {output_dir}")
 
 
 if __name__ == "__main__":
