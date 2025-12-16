@@ -105,6 +105,7 @@ class HFJudge:
         self.is_llama = "llama" in model_name.lower()
 
         # Load model with appropriate device handling
+        self.model = None  # Initialize to None to ensure it's defined
         try:
             if device.type == "cuda":
                 self.model = AutoModelForCausalLM.from_pretrained(
@@ -134,15 +135,23 @@ class HFJudge:
                 f"  5. Ensure you have sufficient disk space and memory"
             ) from e
         
+        # Verify model was loaded successfully
+        if self.model is None:
+            raise RuntimeError(f"Model '{model_name}' failed to load: self.model is None after loading attempt")
+        
         # Set pad_token_id in model config to avoid warnings during generation
         # (Do this AFTER model is loaded)
-        if hasattr(self.model, 'config'):
-            if self.model.config.pad_token_id is None:
-                self.model.config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-            # Also set in generation config if it exists
-            if hasattr(self.model, 'generation_config') and self.model.generation_config is not None:
-                if self.model.generation_config.pad_token_id is None:
-                    self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        try:
+            if hasattr(self.model, 'config') and self.model.config is not None:
+                if self.model.config.pad_token_id is None:
+                    self.model.config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                # Also set in generation config if it exists
+                if hasattr(self.model, 'generation_config') and self.model.generation_config is not None:
+                    if self.model.generation_config.pad_token_id is None:
+                        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        except AttributeError as e:
+            # If model doesn't have expected attributes, log but continue
+            print(f"Warning: Could not set pad_token_id in model config: {e}")
         
         self.model.eval()
 
