@@ -100,15 +100,6 @@ class HFJudge:
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Set pad_token_id in model config to avoid warnings during generation
-        if hasattr(self.model, 'config'):
-            if self.model.config.pad_token_id is None:
-                self.model.config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-            # Also set in generation config if it exists
-            if hasattr(self.model, 'generation_config') and self.model.generation_config is not None:
-                if self.model.generation_config.pad_token_id is None:
-                    self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-        
         # Detect model type for chat template handling
         self.is_qwen = "qwen" in model_name.lower()
         self.is_llama = "llama" in model_name.lower()
@@ -142,6 +133,17 @@ class HFJudge:
                 f"  4. Check your internet connection\n"
                 f"  5. Ensure you have sufficient disk space and memory"
             ) from e
+        
+        # Set pad_token_id in model config to avoid warnings during generation
+        # (Do this AFTER model is loaded)
+        if hasattr(self.model, 'config'):
+            if self.model.config.pad_token_id is None:
+                self.model.config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+            # Also set in generation config if it exists
+            if hasattr(self.model, 'generation_config') and self.model.generation_config is not None:
+                if self.model.generation_config.pad_token_id is None:
+                    self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        
         self.model.eval()
 
     @torch.no_grad()
