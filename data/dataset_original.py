@@ -97,7 +97,7 @@ class PromptSegmentDataset(Dataset):
                 self.annotation_df = self.test_df
 
         self.trainsize = trainsize
-        logger.info("Loaded %d samples for %s mode", len(self.annotation_df), mode)
+        logging.info("Loaded %d samples for %s mode", len(self.annotation_df), mode)
 
         self.IMAGE_TOKEN_INDEX = -200
         self.image_processor = image_processor
