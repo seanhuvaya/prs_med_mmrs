@@ -1,26 +1,20 @@
 import os
-import sys
-import argparse
-import torch 
-import torch.nn as nn 
-from torch.utils.data import DataLoader
-from torch.amp import autocast
-from tqdm import tqdm
 import logging
+import argparse
+
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
-from models.llm_seg_original import build_llm_seg
+from tqdm import tqdm
+from datetime import datetime
+from torch.amp import autocast
+
+from utils.logging import setup_logging
 from data.dataset_original import create_dataloader
+from models.llm_seg_original import build_llm_seg
 from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/training.log'),
-        logging.StreamHandler()
-    ]
-)
 
 def count_train_parameters(model):
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
@@ -28,9 +22,10 @@ def count_train_parameters(model):
     print(f"Number of trainable parameters: {num_params / 1e6:.2f}M")
     return num_params
 
-def evaluate(model, val_loader, device="cuda:0"): 
+
+def evaluate(model, val_loader, epoch, device="cuda:0"):
     dice_score_list = []
-    print("Number of val sample", len(val_loader))
+    logging.info("Number of val sample", len(val_loader))
     for batch in tqdm(val_loader, desc="Evaluating"):
         model.eval()
         model.to(device)
@@ -38,27 +33,41 @@ def evaluate(model, val_loader, device="cuda:0"):
         image_tensor = batch['image_tensor'].to(device)
         mask_tensor = batch['mask_tensor'].to(device)
         image_sam_tensor = batch['image_sam'].to(device)
+        labels = batch['label'].to(device)
+
         with torch.no_grad():
-            # During evaluation, model returns (final_mask, output) - only 2 values
-            outputs, _ = model(
+
+            outputs_mask, output_cls, logit_loss = model(
                 input_ids=input_ids,
                 image_tensor_for_vlm=image_tensor,
                 image_tensor_for_image_enc=image_sam_tensor,
                 attention_mask=batch['attention_masks'].to(device),
                 answers=batch['answers_ids'].to(device)
             )
-            dice_score_value = dice_score(outputs, mask_tensor)
+
+            cls_loss = nn.CrossEntropyLoss()(output_cls, labels)
+            segment_loss = structure_loss(outputs_mask, mask_tensor)
+
+            if epoch < 5:
+                loss = segment_loss + 0.5 * cls_loss + logit_loss
+            else:
+                loss = segment_loss + logit_loss
+
+            dice_score_value = dice_score(outputs_mask, mask_tensor)
             dice_score_list.append(dice_score_value.item())
+
     mean_dice = sum(dice_score_list) / len(dice_score_list)
-    return mean_dice
-        
+
+    return mean_dice, loss
+
+
 def train(
-    model,
-    full_loader,
-    optimizer,
-    num_epochs=10,
-    device="cuda:0",
-    save_dir="./checkpoints"
+        model,
+        full_loader,
+        optimizer,
+        num_epochs=10,
+        device="cuda:0",
+        save_dir="./checkpoints"
 ):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
@@ -66,13 +75,10 @@ def train(
         eta_min=1e-6
     )
 
-    bce_dice_loss = BceDiceLoss()
-
-    dataloader = full_loader["train"]
+    train_dataloader = full_loader["train"]
     val_dataloader = full_loader["val"]
-    
-    os.makedirs(save_dir, exist_ok=True)
-    
+    best_val_loss = float("inf")
+
     for epoch in range(num_epochs):
         model.train()
         model.to(device)
@@ -80,11 +86,11 @@ def train(
         total_llm_loss = 0
         total_segment_loss = 0
         total_cls_loss = 0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
 
         for batch in progress_bar:
             optimizer.zero_grad()
-            
+
             input_ids = batch['input_ids'].to(device)
             image_tensor = batch['image_tensor'].to(device)
             mask_tensor = batch['mask_tensor'].to(device)
@@ -92,27 +98,27 @@ def train(
             attention_mask = batch['attention_masks'].to(device)
             answers_ids = batch['answers_ids'].to(device)
             labels = batch['label'].to(device)
-            
+
             with autocast(dtype=torch.bfloat16, device_type=device):
                 outputs_mask, output_cls, logit_loss = model(
-                    input_ids = input_ids, 
-                    image_tensor_for_vlm = image_tensor, 
-                    image_tensor_for_image_enc = image_sam_tensor, 
-                    attention_mask = attention_mask,
-                    answers = answers_ids)
-            
+                    input_ids=input_ids,
+                    image_tensor_for_vlm=image_tensor,
+                    image_tensor_for_image_enc=image_sam_tensor,
+                    attention_mask=attention_mask,
+                    answers=answers_ids)
+
             outputs_mask = F.interpolate(outputs_mask, size=(1024, 1024), mode='bilinear', align_corners=False)
             cls_loss = nn.CrossEntropyLoss()(output_cls, labels)
             segment_loss = structure_loss(outputs_mask, mask_tensor)
-            
+
             if epoch < 5:
-                loss = segment_loss + 0.5 * cls_loss + logit_loss 
+                loss = segment_loss + 0.5 * cls_loss + logit_loss
             else:
                 loss = segment_loss + logit_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()  
+            optimizer.step()
 
             ep_loss += loss.item()
             avg_loss = ep_loss / (progress_bar.n + 1)
@@ -123,29 +129,34 @@ def train(
             avg_segment_loss = total_segment_loss / (progress_bar.n + 1)
             avg_cls_loss = total_cls_loss / (progress_bar.n + 1)
             if progress_bar.n % 1000 == 0:
-                logging.info(f"Epoch [{epoch+1}/{num_epochs}], Step [{progress_bar.n}], Loss: {avg_loss}, LLM Loss: {avg_llm_loss}, Segment Loss: {avg_segment_loss}, Cls Loss: {avg_cls_loss}")
-            progress_bar.set_postfix(loss=avg_loss, llm_loss=avg_llm_loss, segment_loss=avg_segment_loss, cls_loss=avg_cls_loss)
-        
+                logging.info(
+                    f"Epoch [{epoch + 1}/{num_epochs}], Step [{progress_bar.n}], Loss: {avg_loss}, LLM Loss: {avg_llm_loss}, Segment Loss: {avg_segment_loss}, Cls Loss: {avg_cls_loss}")
+            progress_bar.set_postfix(loss=avg_loss, llm_loss=avg_llm_loss, segment_loss=avg_segment_loss,
+                                     cls_loss=avg_cls_loss)
+
         scheduler.step()
         model.eval()
         ep_loss /= len(dataloader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {ep_loss}")
-        logging.info(f"Epoch [{epoch+1}/{num_epochs}], Loss: {ep_loss}")
+        logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Training Loss: {ep_loss}")
+
         model.eval()
-        mean_dice = evaluate(model, val_dataloader, device=device)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Val mean Dice Score: {mean_dice}")
-        logging.info(f"Epoch [{epoch+1}/{num_epochs}], Val mean Dice Score: {mean_dice}")
-        
-        # Save checkpoint
-        checkpoint_path = os.path.join(save_dir, f"llm_seg_{epoch+1}")
+        mean_dice, val_loss = evaluate(model, val_dataloader, epoch, device=device)
+        logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Val Loss: {val_loss}, Val mean Dice Score: {mean_dice}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            checkpoint_path = os.path.join(save_dir, f"llm_seg_best_model_epoch_{epoch + 1}")
+        else:
+            checkpoint_path = os.path.join(save_dir, f"llm_seg_{epoch + 1}")
+
         model.save_model(checkpoint_path)
-        print(f"Saved checkpoint to {checkpoint_path}")
+        logging.info(f"Saved checkpoint to {checkpoint_path}")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PRS-Med Training (Original Implementation)')
+    parser = argparse.ArgumentParser(description='PRS-Med Training')
     parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory containing data (e.g., data_v2/)')
+                        help='Root directory containing data (e.g., data/)')
     parser.add_argument('--ann_paths', type=str, required=True,
                         help='Comma-separated paths to annotation CSV files')
     parser.add_argument('--vlm_path', type=str, required=True,
@@ -154,7 +165,7 @@ def parse_args():
                         help='Path to TinySAM checkpoint')
     parser.add_argument('--sam_model_type', type=str, default='vit_t',
                         help='TinySAM model type (default: vit_t)')
-    parser.add_argument('--batch_size', type=int, default=4,
+    parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=20,
                         help='Number of epochs')
@@ -168,17 +179,23 @@ def parse_args():
                         help='Load model in 8-bit')
     parser.add_argument('--load_4bit', action='store_true',
                         help='Load model in 4-bit')
+    parser.add_argument('--cls_num_out', type=int, default=6, help='Number of output classes')
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    
-    os.makedirs('logs', exist_ok=True)
+
+    log_file = f"logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    setup_logging(log_file)
+
+    logging.info(f"Creating checkpoints directory: {args.save_dir}")
     os.makedirs(args.save_dir, exist_ok=True)
-    
-    device = args.device
-    
+
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    logging.info(f"Using device: {device}")
+
     # Build model
     model, tokenizer, image_processor, config = build_llm_seg(
         model_path=args.vlm_path,
@@ -187,12 +204,13 @@ if __name__ == "__main__":
         load_4bit=args.load_4bit,
         device=device,
         sam_model_type=args.sam_model_type,
-        sam_checkpoint_path=args.sam_ckpt
+        sam_checkpoint_path=args.sam_ckpt,
+        cls_num_out = args.cls_num_out
     )
 
     # Parse annotation paths
     ann_paths = [p.strip() for p in args.ann_paths.split(',')]
-    
+
     # Create dataloader
     dataloader = create_dataloader(
         data_path=args.data_root,
@@ -200,8 +218,7 @@ if __name__ == "__main__":
         data_config=config,
         image_processor=image_processor,
         tokenizer=tokenizer,
-        batch_size=args.batch_size,
-        mode="train"
+        batch_size=args.batch_size
     )
 
     model.to(device)
@@ -214,8 +231,8 @@ if __name__ == "__main__":
     )
 
     train_params = count_train_parameters(model)
-    print("Trainable parameters:", train_params)
-    
+    logging.debug("Trainable parameters:", train_params)
+
     train(
         model=model,
         full_loader=dataloader,
@@ -224,4 +241,3 @@ if __name__ == "__main__":
         device=device,
         save_dir=args.save_dir
     )
-

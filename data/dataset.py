@@ -1,12 +1,12 @@
+import glob
 import os
+import re
+
 import pandas as pd
-import numpy as np
 from PIL import Image
-import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import glob
-import re
+
 
 class PRSMedDataset(Dataset):
     def __init__(self, split='train', transform=None, mask_transform=None, 

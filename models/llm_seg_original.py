@@ -2,11 +2,10 @@ import os
 import math
 import torch
 import torch.nn as nn
+import logging
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
-# Import from local llava module (self-contained)
 from llava.model.builder import load_pretrained_model
-from llava.mm_utils import get_model_name_from_path
 from llava.utils import disable_torch_init
 from tinysam import sam_model_registry
 
@@ -37,7 +36,8 @@ class LLMSeg(nn.Module):
             model_base=None, 
             load_8bit=False, 
             load_4bit=False, 
-            device="cuda:0"
+            device="cuda:0",
+            cls_num_out=6
         ):
 
         super(LLMSeg, self).__init__()
@@ -50,18 +50,9 @@ class LLMSeg(nn.Module):
             task_type=TaskType.CAUSAL_LM,
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
         )
-        
-        # Handle both Hugging Face model IDs and local paths
-        # Check if it's a Hugging Face model ID (contains '/' but not a local path)
-        is_hf_id = '/' in model_path and not os.path.isdir(model_path) and not os.path.isfile(model_path)
-        if is_hf_id:
-            # Hugging Face model ID (e.g., "microsoft/llava-med-v1.5-mistral-7b")
-            model_name = model_path.split('/')[-1]  # Extract model name from HF ID
-            print(f"Loading model from Hugging Face: {model_path}")
-        else:
-            # Local path
-            model_name = get_model_name_from_path(model_path)
-            print(f"Loading model from local path: {model_path}")
+
+        model_name = model_path.split('/')[-1]  # Extract model name from HF ID
+        logging.info(f"Loading model from Hugging Face: {model_path}")
         
         self.tokenizer, self.base_model, self.image_processor, self.context_len = load_pretrained_model(
             model_path,
@@ -85,7 +76,7 @@ class LLMSeg(nn.Module):
         self.cls = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(256, 6)
+            nn.Linear(256, cls_num_out)
         )
         torch.nn.init.xavier_uniform_(self.cls[2].weight)
         torch.nn.init.ones_(self.cls[2].bias)
@@ -110,7 +101,7 @@ class LLMSeg(nn.Module):
         torch.save(self.cls.state_dict(), os.path.join(save_path, "cls.pth"))
 
     def load_model(self, load_path):
-        print("Loading model from:", load_path)
+        logging.info("Loading model from:", load_path)
         self.tokenizer = self.tokenizer.from_pretrained(os.path.join(load_path, "tokenizer"))
         self.mask_decoder.load_state_dict(torch.load(os.path.join(load_path, "mask_decoder.pth")))
         if self.image_encoder is not None:
@@ -131,7 +122,6 @@ class LLMSeg(nn.Module):
         image_tensor_for_vlm,
         image_tensor_for_image_enc,
         input_ids_for_seg=None,
-        attention_mask = None,
         temperature=0.1,
         max_new_tokens=512,
         top_p=0.95
@@ -221,14 +211,16 @@ def build_llm_seg(
         load_4bit=False, 
         device="cuda:0",
         sam_model_type="vit_t",
-        sam_checkpoint_path=None
+        sam_checkpoint_path=None,
+        cls_num_out=6
 ):
     llm_seg = LLMSeg(
         model_path=model_path,
         model_base=model_base,
         load_8bit=load_8bit,
         load_4bit=load_4bit,
-        device=device
+        device=device,
+        cls_num_out=cls_num_out
     )
     
     if sam_checkpoint_path is not None:

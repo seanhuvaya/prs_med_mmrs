@@ -1,12 +1,11 @@
 import os
+import re
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import pandas as pd
-import re
 
-# Import from local modules (self-contained)
 from data_utils.utils import load_annotation, load_image, binary_loader
 from llava.mm_utils import tokenizer_image_token, process_images
 
@@ -24,7 +23,7 @@ class PromptSegmentDataset(Dataset):
         tokenizer=None,
         trainsize = 512,
         mode = "train",
-        specific_dataset=None  # New: filter by specific dataset (e.g., 'head_and_neck', 'prostate')
+        specific_dataset=None
     ):
         self.data_path = data_path
         self.annotation_path = annotation_path
@@ -155,17 +154,17 @@ class PromptSegmentDataset(Dataset):
 
     def _get_label_from_path(self, image_path):
         """Extract label from image path based on dataset name"""
-        if "ISIC" in image_path or "skin" in image_path.lower():
+        if "skin" in image_path.lower():
             return 4
         elif "breast" in image_path.lower():
             return 1
-        elif "brain" in image_path.lower() or "head_and_neck" in image_path.lower():
+        elif "brain" in image_path.lower():
             return 0
         elif "lung_CT" in image_path or "lung_ct" in image_path.lower():
             return 2
-        elif "lung_Xray" in image_path or "lung_xray" in image_path.lower():
+        elif "lung_xray" in image_path.lower() or "dental_xray" in image_path.lower():
             return 3
-        elif "prostate" in image_path.lower():
+        elif "polyp" in image_path.lower():
             return 5
         else:
             return 0  # default
@@ -284,9 +283,8 @@ def create_dataloader(
     data_config=None,
     image_processor=None,
     tokenizer=None,
-    batch_size=2,
-    mode="train",
-    specific_dataset=None  # New: filter by specific dataset
+    batch_size=8,
+    specific_dataset=None
 ):
     # Create train dataset
     train_dataset = PromptSegmentDataset(
@@ -310,16 +308,6 @@ def create_dataloader(
         specific_dataset=specific_dataset
     )
     
-    # If no validation samples found, split train dataset
-    if len(val_dataset) == 0:
-        print("No validation split found in CSV. Splitting train dataset 90/10...")
-        train_size = int(len(train_dataset) * 0.9)
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, 
-            [train_size, val_size]
-        )
-    
     train_dataloader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
@@ -337,6 +325,7 @@ def create_dataloader(
         num_workers=8,
         pin_memory=True
     )
+
     dataloader = {
         "train": train_dataloader,
         "val": val_dataloader

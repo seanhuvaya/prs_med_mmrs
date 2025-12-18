@@ -1,7 +1,7 @@
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F
-import numpy as np
+
 
 class BasicBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -126,7 +126,6 @@ class PromptedMaskDecoder(nn.Module):
         prompt_feat: (B, T, 2048) - float16
         """
         B, _, H, W = image_feat.shape
-        T = prompt_feat.shape[1]
         image_feat = image_feat.float()
 
         prompt_feat = prompt_feat.float()
