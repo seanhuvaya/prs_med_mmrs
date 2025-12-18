@@ -25,7 +25,7 @@ def count_train_parameters(model):
 
 def evaluate(model, val_loader, epoch, device="cuda:0"):
     dice_score_list = []
-    logging.info("Number of val sample", len(val_loader))
+    logging.info(f"Number of val sample: {len(val_loader)}")
     for batch in tqdm(val_loader, desc="Evaluating"):
         model.eval()
         model.to(device)
