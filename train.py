@@ -36,8 +36,7 @@ def evaluate(model, val_loader, epoch, device="cuda:0"):
         labels = batch['label'].to(device)
 
         with torch.no_grad():
-
-            outputs_mask, output_cls, logit_loss = model(
+            outputs_mask, _ = model(
                 input_ids=input_ids,
                 image_tensor_for_vlm=image_tensor,
                 image_tensor_for_image_enc=image_sam_tensor,
@@ -45,20 +44,12 @@ def evaluate(model, val_loader, epoch, device="cuda:0"):
                 answers=batch['answers_ids'].to(device)
             )
 
-            cls_loss = nn.CrossEntropyLoss()(output_cls, labels)
-            segment_loss = structure_loss(outputs_mask, mask_tensor)
-
-            if epoch < 5:
-                loss = segment_loss + 0.5 * cls_loss + logit_loss
-            else:
-                loss = segment_loss + logit_loss
-
             dice_score_value = dice_score(outputs_mask, mask_tensor)
             dice_score_list.append(dice_score_value.item())
 
     mean_dice = sum(dice_score_list) / len(dice_score_list)
 
-    return mean_dice, loss
+    return mean_dice
 
 
 def train(
@@ -77,7 +68,7 @@ def train(
 
     train_dataloader = full_loader["train"]
     val_dataloader = full_loader["val"]
-    best_val_loss = float("inf")
+    best_mean_dice = float("-inf")
 
     for epoch in range(num_epochs):
         model.train()
@@ -140,11 +131,11 @@ def train(
         logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Training Loss: {ep_loss}")
 
         model.eval()
-        mean_dice, val_loss = evaluate(model, val_dataloader, epoch, device=device)
-        logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Val Loss: {val_loss}, Val mean Dice Score: {mean_dice}")
+        mean_dice = evaluate(model, val_dataloader, epoch, device=device)
+        logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Val mean Dice Score: {mean_dice}")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if mean_dice > best_mean_dice:
+            best_mean_dice = mean_dice
             checkpoint_path = os.path.join(save_dir, f"llm_seg_best_model_epoch_{epoch + 1}")
         else:
             checkpoint_path = os.path.join(save_dir, f"llm_seg_{epoch + 1}")
@@ -205,7 +196,7 @@ if __name__ == "__main__":
         device=device,
         sam_model_type=args.sam_model_type,
         sam_checkpoint_path=args.sam_ckpt,
-        cls_num_out = args.cls_num_out
+        cls_num_out=args.cls_num_out
     )
 
     # Parse annotation paths

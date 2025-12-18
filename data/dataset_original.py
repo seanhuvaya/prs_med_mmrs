@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 
 import torch
 import torch.nn as nn
@@ -21,8 +22,8 @@ class PromptSegmentDataset(Dataset):
         data_config=None,
         image_processor=None,
         tokenizer=None,
-        trainsize = 512,
-        mode = "train",
+        trainsize=512,
+        mode="train",
         specific_dataset=None
     ):
         self.data_path = data_path
@@ -30,7 +31,7 @@ class PromptSegmentDataset(Dataset):
         self.tokenizer = tokenizer
         self.annotation_df = None
         self.specific_dataset = specific_dataset
-        
+
         # If annotation_path is None, load all CSVs from annotations/ directory
         if annotation_path is None:
             annotations_dir = os.path.join(data_path, 'annotations')
@@ -39,17 +40,17 @@ class PromptSegmentDataset(Dataset):
                 if len(csv_files) == 0:
                     raise ValueError(f"No CSV files found in {annotations_dir}")
                 annotation_path = csv_files
-                print(f"Auto-detected {len(csv_files)} annotation file(s) from {annotations_dir}")
+                logging.info("Auto-detected %d annotation file(s) from %s", len(csv_files), annotations_dir)
             else:
                 raise ValueError(f"Annotations directory not found: {annotations_dir}. Please specify --ann_paths")
-        
+
         # Handle multiple annotation paths
         if isinstance(annotation_path, str):
             annotation_path = [annotation_path]
-        
+
         # Load all annotations
         self.train_df, self.test_df = load_annotation(annotation_path)
-        
+
         # Filter by specific dataset if requested
         if specific_dataset is not None:
             # Filter by dataset name in image_path or task column
@@ -66,8 +67,13 @@ class PromptSegmentDataset(Dataset):
                 self.test_df = self.test_df[
                     self.test_df['image_path'].str.contains(specific_dataset, case=False, na=False)
                 ]
-            print(f"Filtered to dataset: {specific_dataset} ({len(self.train_df)} train, {len(self.test_df)} test samples)")
-        
+            logging.info(
+                "Filtered to dataset: %s (%d train, %d test samples)",
+                specific_dataset,
+                len(self.train_df),
+                len(self.test_df)
+            )
+
         # Use split column if available, otherwise use train_df/test_df split
         if 'split' in self.train_df.columns:
             # Filter by split column
@@ -89,14 +95,14 @@ class PromptSegmentDataset(Dataset):
                 self.annotation_df = self.train_df
             else:
                 self.annotation_df = self.test_df
-        
+
         self.trainsize = trainsize
-        print(f"Loaded {len(self.annotation_df)} samples for {mode} mode")
+        logger.info("Loaded %d samples for %s mode", len(self.annotation_df), mode)
 
         self.IMAGE_TOKEN_INDEX = -200
         self.image_processor = image_processor
         self.data_config = data_config
-        
+
         self.mask_transform = transforms.Compose([
             transforms.Resize((1024, 1024)),
             transforms.ToTensor(),
@@ -109,39 +115,39 @@ class PromptSegmentDataset(Dataset):
                 [0.485, 0.456, 0.406],
                 [0.229, 0.224, 0.225])
         ])
-        
+
     def __len__(self):
         return len(self.annotation_df)
 
     def answer_process(self, question, prompt, answer):
         input_prompt = "<image>\n" + f"### User: {question} \n" + "### Assistant: \n" + answer
         answer_ids = tokenizer_image_token(
-            input_prompt, 
-            self.tokenizer, 
-            self.IMAGE_TOKEN_INDEX, 
+            input_prompt,
+            self.tokenizer,
+            self.IMAGE_TOKEN_INDEX,
             return_tensors='pt'
         )
         return answer_ids
 
     def prompt_process(self, prompt):
-        prompt_for_vlm = "<image> \n" + prompt 
+        prompt_for_vlm = "<image> \n" + prompt
         input_ids = tokenizer_image_token(
-            prompt_for_vlm, 
-            self.tokenizer, 
-            self.IMAGE_TOKEN_INDEX, 
+            prompt_for_vlm,
+            self.tokenizer,
+            self.IMAGE_TOKEN_INDEX,
             return_tensors='pt'
         )
         return input_ids
-    
+
     def process_image(self, image_path):
         image_pil = load_image(image_path)
         image_tensor = process_images(
-            [image_pil], 
-            self.image_processor, 
+            [image_pil],
+            self.image_processor,
             self.data_config
         )
         return image_tensor.squeeze(0).to(torch.float16)
-    
+
     def process_sam_image(self, image_path):
         image_pil = load_image(image_path)
         image_sam_tensor = self.image_sam_transform(image_pil)
@@ -171,7 +177,7 @@ class PromptSegmentDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.annotation_df.iloc[idx]
-        
+
         # Handle image path - support data_v2 structure
         if 'image_path' in row:
             image_path = row['image_path']
@@ -196,9 +202,9 @@ class PromptSegmentDataset(Dataset):
             image_path = os.path.join(self.data_path, task, f"{split}_images", image_name)
         else:
             raise ValueError("CSV must have either 'image_path' or 'image_name' column")
-        
+
         image_path = image_path.replace("\\", "/")
-        
+
         # Handle mask path - support data_v2 structure
         if 'mask_path' in row:
             mask_path = row['mask_path']
@@ -210,24 +216,24 @@ class PromptSegmentDataset(Dataset):
             mask_path = re.sub(r"/(train|test|val)_images/", r"/\1_masks/", image_path)
             if "ISIC" in mask_path:
                 mask_path = mask_path.replace(".jpg", ".png")
-        
+
         mask_path = mask_path.replace("\\", "/")
-        
+
         # Get question, answer, position
         question = row.get('question', '')
         answer = row.get('answer', '')
         position = row.get('position', question)  # Fallback to question if position not available
-        
+
         # Process data
         mask_tensor = self.process_mask(mask_path)
         image_sam_tensor = self.process_sam_image(image_path)
         image_tensor = self.process_image(image_path)
         input_ids = self.prompt_process(question)
         answers_ids = self.answer_process(question, position, answer)
-        
+
         # Get label
         label = self._get_label_from_path(image_path)
-        
+
         return {
             'input_ids': input_ids,
             'image_tensor': image_tensor,
@@ -236,20 +242,20 @@ class PromptSegmentDataset(Dataset):
             "image_sam": image_sam_tensor,
             "label": label
         }
-    
+
+
 def collate_fn(batch):
     padded_input_ids = nn.utils.rnn.pad_sequence(
-        [item['input_ids'].squeeze(0) for item in batch], 
-        batch_first=True, 
+        [item['input_ids'].squeeze(0) for item in batch],
+        batch_first=True,
         padding_value=IGNORE_INDEX
     )
     input_ids = padded_input_ids[:, :MAX_PROMPT_LENGTH]
     input_ids = input_ids.to(torch.int64)
-    
 
     padded_answers_ids = nn.utils.rnn.pad_sequence(
-        [item['answers_ids'] for item in batch], 
-        batch_first=True, 
+        [item['answers_ids'] for item in batch],
+        batch_first=True,
         padding_value=IGNORE_INDEX
     )
 
@@ -277,6 +283,7 @@ def collate_fn(batch):
         "label": torch.tensor([item['label'] for item in batch])
     }
 
+
 def create_dataloader(
     data_path,
     annotation_path=None,
@@ -296,7 +303,7 @@ def create_dataloader(
         mode="train",
         specific_dataset=specific_dataset
     )
-    
+
     # Create val dataset
     val_dataset = PromptSegmentDataset(
         data_path=data_path,
@@ -307,20 +314,20 @@ def create_dataloader(
         mode="val",
         specific_dataset=specific_dataset
     )
-    
+
     train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
         collate_fn=collate_fn,
         num_workers=8,
         pin_memory=True
     )
 
     val_dataloader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
         collate_fn=collate_fn,
         num_workers=8,
         pin_memory=True
@@ -330,6 +337,5 @@ def create_dataloader(
         "train": train_dataloader,
         "val": val_dataloader
     }
-    
-    return dataloader
 
+    return dataloader

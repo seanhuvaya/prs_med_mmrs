@@ -127,7 +127,7 @@ This repository includes an exact implementation matching the original PRS-Med p
 
 **Training with Original Implementation:**
 ```bash
-python train_original.py \
+python train.py \
     --data_root /path/to/data_v2 \
     --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
     --vlm_path microsoft/llava-med-v1.5-mistral-7b \
