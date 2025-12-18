@@ -1,12 +1,10 @@
-import pandas as pd
-import numpy as np
 import os
-from random import shuffle
-import random
-from PIL import Image
-import requests
 from io import BytesIO
-from sklearn.utils import shuffle
+
+import pandas as pd
+import requests
+from PIL import Image
+
 
 def load_annotation(annotation_path):
     """

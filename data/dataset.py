@@ -1,210 +1,341 @@
-import glob
 import os
 import re
+import logging
 
-import pandas as pd
-from PIL import Image
+import torch
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
+from data_utils.utils import load_annotation, load_image, binary_loader
+from llava.mm_utils import tokenizer_image_token, process_images
 
-class PRSMedDataset(Dataset):
-    def __init__(self, split='train', transform=None, mask_transform=None, 
-                 data_root="data", img_dir="images_and_masks", max_samples=None,
-                 specific_dataset=None):
-        self.split = split
-        self.data_root = data_root
-        self.img_dir = img_dir
+IGNORE_INDEX = 0
+MAX_PROMPT_LENGTH = 512
+
+
+class PromptSegmentDataset(Dataset):
+    def __init__(
+        self,
+        data_path,
+        annotation_path=None,
+        data_config=None,
+        image_processor=None,
+        tokenizer=None,
+        trainsize=512,
+        mode="train",
+        specific_dataset=None
+    ):
+        self.data_path = data_path
+        self.annotation_path = annotation_path
+        self.tokenizer = tokenizer
+        self.annotation_df = None
         self.specific_dataset = specific_dataset
-        self.transform = transform or self._get_default_transform()
-        self.mask_transform = mask_transform or self._get_default_mask_transform()
-        self.df = self._load_annotations()
-        
-        # Filter by split
-        self.df = self._filter_by_split()
-        
-        # Filter by specific dataset if provided
-        if specific_dataset:
-            self.df = self.df[self.df['dataset_name'] == specific_dataset]
-            print(f"Filtered to dataset: {specific_dataset}")
-        
-        # Limit samples if specified
-        if max_samples:
-            self.df = self.df.head(max_samples)
-        
-        print(f"Loaded {len(self.df)} samples for {split} split" + 
-              (f" from {specific_dataset}" if specific_dataset else " from all datasets"))
 
-    def _load_annotations(self):
-        csv_files = glob.glob(os.path.join(self.data_root, "annotations", "*.csv"))
-        if len(csv_files) == 0:
-            raise FileNotFoundError(f"No CSV files found in {os.path.join(self.data_root, 'annotations')}")
-        
-        dfs = []
-        for csv_file in csv_files:
-            df = pd.read_csv(csv_file)
-            df['dataset_name'] = os.path.splitext(os.path.basename(csv_file))[0]
-            dfs.append(df)
-        
-        return pd.concat(dfs, ignore_index=True)
+        # If annotation_path is None, load all CSVs from annotations/ directory
+        if annotation_path is None:
+            annotations_dir = os.path.join(data_path, 'annotations')
+            if os.path.exists(annotations_dir):
+                csv_files = [os.path.join(annotations_dir, f) for f in os.listdir(annotations_dir) if f.endswith('.csv')]
+                if len(csv_files) == 0:
+                    raise ValueError(f"No CSV files found in {annotations_dir}")
+                annotation_path = csv_files
+                logging.info("Auto-detected %d annotation file(s) from %s", len(csv_files), annotations_dir)
+            else:
+                raise ValueError(f"Annotations directory not found: {annotations_dir}. Please specify --ann_paths")
 
-    def _filter_by_split(self):
-        """Filter dataframe by split using various column naming conventions"""
-        df = self.df.copy()
-        
-        # Try different split column naming patterns
-        split_patterns = [
-            f"{self.split}",  # exact match
-            f"split_{self.split}",
-            f"is_{self.split}",
-            f"{self.split}_set"
-        ]
-        
-        found_split = False
-        for pattern in split_patterns:
-            if pattern in df.columns:
-                df = df[df[pattern] == 1]
-                found_split = True
-                break
-        
-        # If no specific split column, look for a generic 'split' column
-        if not found_split and 'split' in df.columns:
-            df = df[df['split'] == self.split]
-            found_split = True
-        
-        # If still no split filtering, use all data (with warning)
-        if not found_split:
-            print(f"Warning: No split filtering applied for {self.split}. Using all data.")
-        
-        return df
+        # Handle multiple annotation paths
+        if isinstance(annotation_path, str):
+            annotation_path = [annotation_path]
 
-    def get_available_datasets(self):
-        """Get list of all available datasets in the current split"""
-        return self.df['dataset_name'].unique().tolist()
+        # Load all annotations
+        self.train_df, self.test_df = load_annotation(annotation_path)
 
-    def _get_default_transform(self):
-        return transforms.Compose([
+        # Filter by specific dataset if requested
+        if specific_dataset is not None:
+            # Filter by dataset name in image_path or task column
+            if 'task' in self.train_df.columns:
+                self.train_df = self.train_df[self.train_df['task'] == specific_dataset]
+            else:
+                # Filter by image_path containing the dataset name
+                self.train_df = self.train_df[
+                    self.train_df['image_path'].str.contains(specific_dataset, case=False, na=False)
+                ]
+            if 'task' in self.test_df.columns:
+                self.test_df = self.test_df[self.test_df['task'] == specific_dataset]
+            else:
+                self.test_df = self.test_df[
+                    self.test_df['image_path'].str.contains(specific_dataset, case=False, na=False)
+                ]
+            logging.info(
+                "Filtered to dataset: %s (%d train, %d test samples)",
+                specific_dataset,
+                len(self.train_df),
+                len(self.test_df)
+            )
+
+        # Use split column if available, otherwise use train_df/test_df split
+        if 'split' in self.train_df.columns:
+            # Filter by split column
+            if mode == "train":
+                self.annotation_df = self.train_df[self.train_df['split'] == 'train'].copy()
+            elif mode == "val":
+                # Check if val split exists, otherwise use train for validation
+                if 'val' in self.train_df['split'].values:
+                    self.annotation_df = self.train_df[self.train_df['split'] == 'val'].copy()
+                else:
+                    # Use a portion of train for validation
+                    val_size = int(len(self.train_df) * 0.1)
+                    self.annotation_df = self.train_df.tail(val_size).copy()
+            else:  # test
+                self.annotation_df = self.test_df.copy()
+        else:
+            # Fallback: use train_df/test_df split
+            if mode == "train":
+                self.annotation_df = self.train_df
+            else:
+                self.annotation_df = self.test_df
+
+        self.trainsize = trainsize
+        logging.info("Loaded %d samples for %s mode", len(self.annotation_df), mode)
+
+        self.IMAGE_TOKEN_INDEX = -200
+        self.image_processor = image_processor
+        self.data_config = data_config
+
+        self.mask_transform = transforms.Compose([
             transforms.Resize((1024, 1024)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-    def _get_default_mask_transform(self):
-        return transforms.Compose([
+        self.image_sam_transform = transforms.Compose([
             transforms.Resize((1024, 1024)),
             transforms.ToTensor(),
+            transforms.Normalize(
+                [0.485, 0.456, 0.406],
+                [0.229, 0.224, 0.225])
         ])
 
     def __len__(self):
-        return len(self.df)
+        return len(self.annotation_df)
+
+    def answer_process(self, question, prompt, answer):
+        input_prompt = "<image>\n" + f"### User: {question} \n" + "### Assistant: \n" + answer
+        answer_ids = tokenizer_image_token(
+            input_prompt,
+            self.tokenizer,
+            self.IMAGE_TOKEN_INDEX,
+            return_tensors='pt'
+        )
+        return answer_ids
+
+    def prompt_process(self, prompt):
+        prompt_for_vlm = "<image> \n" + prompt
+        input_ids = tokenizer_image_token(
+            prompt_for_vlm,
+            self.tokenizer,
+            self.IMAGE_TOKEN_INDEX,
+            return_tensors='pt'
+        )
+        return input_ids
+
+    def process_image(self, image_path):
+        image_pil = load_image(image_path)
+        image_tensor = process_images(
+            [image_pil],
+            self.image_processor,
+            self.data_config
+        )
+        return image_tensor.squeeze(0).to(torch.float16)
+
+    def process_sam_image(self, image_path):
+        image_pil = load_image(image_path)
+        image_sam_tensor = self.image_sam_transform(image_pil)
+        return image_sam_tensor.to(torch.float32)
+
+    def process_mask(self, mask_path):
+        mask_image = binary_loader(mask_path)
+        mask_tensor = self.mask_transform(mask_image)
+        return mask_tensor
+
+    def _get_label_from_path(self, image_path):
+        """Extract label from image path based on dataset name"""
+        if "skin" in image_path.lower():
+            return 4
+        elif "breast" in image_path.lower():
+            return 1
+        elif "brain" in image_path.lower():
+            return 0
+        elif "lung_CT" in image_path or "lung_ct" in image_path.lower():
+            return 2
+        elif "lung_xray" in image_path.lower() or "dental_xray" in image_path.lower():
+            return 3
+        elif "polyp" in image_path.lower():
+            return 5
+        else:
+            return 0  # default
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        
-        # Handle image path
-        image_path = os.path.join(self.data_root, self.img_dir, row["image_path"])
-        
-        # Handle mask path - your clever regex approach
-        mask_path = re.sub(r"/(train|test|val)_images/", r"/\1_masks/", row["image_path"])
-        mask_path = os.path.join(self.data_root, self.img_dir, mask_path)
-        
-        # Load image and mask
-        image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
-        
-        # Apply transforms
-        image = self.transform(image)
-        mask = self.mask_transform(mask)
-        
+        row = self.annotation_df.iloc[idx]
+
+        # Handle image path - support data_v2 structure
+        if 'image_path' in row:
+            image_path = row['image_path']
+            # If image_path is relative and starts with task name (e.g., "head_and_neck/train_images/...")
+            if not os.path.isabs(image_path):
+                # Check if it already includes data_path
+                if not image_path.startswith(self.data_path):
+                    image_path = os.path.join(self.data_path, image_path)
+        elif 'image_name' in row:
+            # Construct path from image_name and split
+            split = row.get('split', 'train')
+            task = row.get('task', None)
+            # Try to infer task from image_path if available
+            if task is None and 'image_path' in row:
+                # Extract task from image_path (e.g., "head_and_neck/train_images/..." -> "head_and_neck")
+                path_parts = row['image_path'].split('/')
+                if len(path_parts) > 0:
+                    task = path_parts[0]
+            if task is None:
+                task = 'head_and_neck'  # default
+            image_name = row['image_name']
+            image_path = os.path.join(self.data_path, task, f"{split}_images", image_name)
+        else:
+            raise ValueError("CSV must have either 'image_path' or 'image_name' column")
+
+        image_path = image_path.replace("\\", "/")
+
+        # Handle mask path - support data_v2 structure
+        if 'mask_path' in row:
+            mask_path = row['mask_path']
+            if not os.path.isabs(mask_path):
+                if not mask_path.startswith(self.data_path):
+                    mask_path = os.path.join(self.data_path, mask_path)
+        else:
+            # Infer mask path from image path
+            mask_path = re.sub(r"/(train|test|val)_images/", r"/\1_masks/", image_path)
+            if "ISIC" in mask_path:
+                mask_path = mask_path.replace(".jpg", ".png")
+
+        mask_path = mask_path.replace("\\", "/")
+
+        # Get question, answer, position
+        question = row.get('question', '')
+        answer = row.get('answer', '')
+        position = row.get('position', question)  # Fallback to question if position not available
+
+        # Process data
+        mask_tensor = self.process_mask(mask_path)
+        image_sam_tensor = self.process_sam_image(image_path)
+        image_tensor = self.process_image(image_path)
+        input_ids = self.prompt_process(question)
+        answers_ids = self.answer_process(question, position, answer)
+
+        # Get label
+        label = self._get_label_from_path(image_path)
+
         return {
-            'image': image.float(),
-            'mask': mask.float(),
-            'question': row["question"],
-            'answer': row["answer"],
-            'dataset': row['dataset_name'],
-            'image_path': image_path
+            'input_ids': input_ids,
+            'image_tensor': image_tensor,
+            'mask_tensor': mask_tensor,
+            'answers_ids': answers_ids,
+            "image_sam": image_sam_tensor,
+            "label": label
         }
 
-class PRSMedDataLoader:
-    def __init__(self, batch_size=8, num_workers=4, data_root="data", max_samples=None):
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.data_root = data_root
-        self.max_samples = max_samples
-        
-    def get_dataloader(self, split='train', shuffle=None, transform=None, 
-                      mask_transform=None, specific_dataset=None):
-        """Get a single dataloader for a specific split and optionally specific dataset"""
-        if shuffle is None:
-            shuffle = (split == 'train')
-            
-        dataset = PRSMedDataset(
-            split=split,
-            transform=transform,
-            mask_transform=mask_transform,
-            data_root=self.data_root,
-            max_samples=self.max_samples,
-            specific_dataset=specific_dataset
-        )
-        
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
-    
-    def get_training_dataloaders(self):
-        """Get dataloaders for training: combined dataset"""
-        return {
-            'train': self.get_dataloader('train', shuffle=True),
-            'val': self.get_dataloader('val', shuffle=False)
-        }
-    
-    def get_testing_dataloaders(self):
-        """Get dataloaders for testing: separate dataloader for each dataset"""
-        # First get the test split to see available datasets
-        test_dataset = PRSMedDataset(split='test', data_root=self.data_root)
-        available_datasets = test_dataset.get_available_datasets()
-        
-        test_dataloaders = {}
-        for dataset_name in available_datasets:
-            test_dataloaders[dataset_name] = self.get_dataloader(
-                split='test', 
-                shuffle=False,
-                specific_dataset=dataset_name
-            )
-            print(f"Created test dataloader for {dataset_name} with {len(test_dataloaders[dataset_name].dataset)} samples")
-        
-        return test_dataloaders
-    
-    def get_all_dataloaders(self):
-        """Get all dataloaders: combined for train/val, separate for test"""
-        return {
-            'train': self.get_dataloader('train', shuffle=True),
-            'val': self.get_dataloader('val', shuffle=False),
-            'test_per_dataset': self.get_testing_dataloaders()
-        }
-    
-    def get_dataset_stats(self):
-        """Get statistics about each dataset"""
-        stats = {}
-        for split in ['train', 'val', 'test']:
-            dataset = PRSMedDataset(split=split, data_root=self.data_root)
-            available_datasets = dataset.get_available_datasets()
-            
-            stats[split] = {}
-            for dataset_name in available_datasets:
-                specific_ds = PRSMedDataset(split=split, data_root=self.data_root, specific_dataset=dataset_name)
-                stats[split][dataset_name] = len(specific_ds)
-        
-        return stats
 
-if __name__ == "__main__":
-    dataset = PRSMedDataset(split="train", data_root="/Users/seanhuvaya/Documents/Capstone Project/sample/data")
-    print(dataset[0])
+def collate_fn(batch):
+    padded_input_ids = nn.utils.rnn.pad_sequence(
+        [item['input_ids'].squeeze(0) for item in batch],
+        batch_first=True,
+        padding_value=IGNORE_INDEX
+    )
+    input_ids = padded_input_ids[:, :MAX_PROMPT_LENGTH]
+    input_ids = input_ids.to(torch.int64)
 
-    dataloader = PRSMedDataLoader(batch_size=8, num_workers=2, data_root="/Users/seanhuvaya/Documents/Capstone Project/sample/data")
-    print(dataloader.get_dataset_stats())
+    padded_answers_ids = nn.utils.rnn.pad_sequence(
+        [item['answers_ids'] for item in batch],
+        batch_first=True,
+        padding_value=IGNORE_INDEX
+    )
 
+    answers_ids = padded_answers_ids[:, :MAX_PROMPT_LENGTH]
+    answers_ids = answers_ids.to(torch.int64)
+
+    attention_masks = torch.ones_like(answers_ids)
+    attention_masks[answers_ids == IGNORE_INDEX] = 0
+    attention_masks = attention_masks.to(torch.long)
+
+    image_tensor = [item['image_tensor'] for item in batch]
+    image_sam_tensor = [item['image_sam'] for item in batch]
+    mask_tensor = [item['mask_tensor'] for item in batch]
+
+    image_tensor = torch.stack(image_tensor, dim=0)
+    mask_tensor = torch.stack(mask_tensor, dim=0)
+    image_sam_tensor = torch.stack(image_sam_tensor, dim=0)
+    return {
+        'input_ids': input_ids,
+        'image_tensor': image_tensor,
+        'mask_tensor': mask_tensor,
+        'answers_ids': answers_ids,
+        'image_sam': image_sam_tensor,
+        "attention_masks": attention_masks,
+        "label": torch.tensor([item['label'] for item in batch])
+    }
+
+
+def create_dataloader(
+    data_path,
+    annotation_path=None,
+    data_config=None,
+    image_processor=None,
+    tokenizer=None,
+    batch_size=8,
+    specific_dataset=None
+):
+    # Create train dataset
+    train_dataset = PromptSegmentDataset(
+        data_path=data_path,
+        annotation_path=annotation_path,
+        data_config=data_config,
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        mode="train",
+        specific_dataset=specific_dataset
+    )
+
+    # Create val dataset
+    val_dataset = PromptSegmentDataset(
+        data_path=data_path,
+        annotation_path=annotation_path,
+        data_config=data_config,
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        mode="val",
+        specific_dataset=specific_dataset
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=8,
+        pin_memory=True
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=8,
+        pin_memory=True
+    )
+
+    dataloader = {
+        "train": train_dataloader,
+        "val": val_dataloader
+    }
+
+    return dataloader

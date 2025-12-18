@@ -11,7 +11,7 @@ from datetime import datetime
 from torch.amp import autocast
 
 from utils.logging import setup_logging
-from data.dataset_original import create_dataloader
+from data.dataset import create_dataloader
 from models.llm_seg_original import build_llm_seg
 from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss
 
@@ -127,7 +127,7 @@ def train(
 
         scheduler.step()
         model.eval()
-        ep_loss /= len(dataloader)
+        ep_loss /= len(train_dataloader)
         logging.info(f"Epoch [{epoch + 1}/{num_epochs}], Training Loss: {ep_loss}")
 
         model.eval()
