@@ -102,8 +102,6 @@ def train(
             cls_loss = nn.CrossEntropyLoss()(output_cls, labels)
             segment_loss = structure_loss(outputs_mask, mask_tensor)
 
-            print(f"segment_loss: {segment_loss.item()}, cls_loss: {cls_loss.item()}, logit_loss: {logit_loss.item()}")
-
             if epoch < 5:
                 loss = segment_loss + 0.5 * cls_loss + logit_loss
             else:
