@@ -28,11 +28,14 @@ class ImageEncoder(nn.Module):
         
         if self.encoder_type in ("sam_med2d", "sammed2d"):
             # Use SAM-Med2D encoder
+            # Infer model type from checkpoint path
+            sam_med2d_model_type = None  # Let SAMMed2DVisionBackbone auto-detect
             logging.info(f"Initializing SAM-Med2D encoder with checkpoint: {checkpoint_path}")
             self.image_encoder = SAMMed2DVisionBackbone(
                 checkpoint_path=checkpoint_path,
                 image_size=image_size,
-                device=device
+                device=device,
+                model_type=sam_med2d_model_type  # None = auto-detect from path
             )
         else:
             # Use TinySAM encoder (default)

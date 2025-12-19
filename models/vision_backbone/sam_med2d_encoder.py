@@ -3,8 +3,9 @@ import torch.nn as nn
 from torchvision import transforms
 import functools
 import sys
+from argparse import Namespace
 
-# Patch torch.load before importing SAM2 to ensure compatibility with PyTorch 2.6+
+# Patch torch.load before importing SAM-Med2D to ensure compatibility with PyTorch 2.6+
 # This allows loading checkpoints that contain optimizer states
 _original_torch_load = torch.load
 
@@ -18,26 +19,42 @@ def _patched_torch_load(f, *args, **kwargs):
 # Apply patch globally
 torch.load = _patched_torch_load
 
-# Try to import SAM2 (for SAM-Med2D based on SAM2)
+# Try to import SAM-Med2D (official OpenGVLab implementation)
+# SAM-Med2D uses segment_anything module, not sam2
 try:
-    from sam2.build_sam import build_sam2
-    SAM2_AVAILABLE = True
-except ImportError:
-    SAM2_AVAILABLE = False
+    # Try importing from sam_med (if installed as a package)
+    try:
+        from sam_med.segment_anything import sam_model_registry
+        SAM_MED2D_AVAILABLE = True
+        SAM_MED2D_SOURCE = "sam_med"
+    except ImportError:
+        # Try importing from segment_anything (if SAM-Med2D repo is in path)
+        try:
+            from segment_anything import sam_model_registry
+            SAM_MED2D_AVAILABLE = True
+            SAM_MED2D_SOURCE = "segment_anything"
+        except ImportError:
+            SAM_MED2D_AVAILABLE = False
+            SAM_MED2D_SOURCE = None
+except Exception:
+    SAM_MED2D_AVAILABLE = False
+    SAM_MED2D_SOURCE = None
 
 
 class SAMMed2DVisionBackbone(nn.Module):
     """
-    Extracts dense, pixel-level features from medical images using SAM2 / SAM-Med2D encoder.
-
-    This implementation is tailored for the official SAM2.1 hiera tiny checkpoint:
-      - config: configs/sam2.1/sam2.1_hiera_t.yaml
-      - weights: sam2.1_hiera_tiny.pt
+    Extracts dense, pixel-level features from medical images using SAM-Med2D encoder.
+    
+    This implementation uses the official SAM-Med2D from OpenGVLab:
+      - Repository: https://github.com/OpenGVLab/SAM-Med2D
+      - Uses segment_anything module (original SAM architecture)
+      - Supports model types: vit_b, vit_l, vit_h
+      - Checkpoint format: sam-med2d_b.pth, sam-med2d_l.pth, etc.
 
     It produces features shaped (B, 256, 16, 16) to match TinySAM for the fusion module.
     """
 
-    def __init__(self, checkpoint_path: str, image_size: int = 1024, device: str = None):
+    def __init__(self, checkpoint_path: str, image_size: int = 1024, device: str = None, model_type: str = None):
         super().__init__()
         self.device = device or (
             "mps" if torch.backends.mps.is_available()
@@ -45,31 +62,90 @@ class SAMMed2DVisionBackbone(nn.Module):
             else "cpu"
         )
 
-        print(f"[INFO] Loading SAM2/SAM-Med2D checkpoint from {checkpoint_path}")
+        print(f"[INFO] Loading SAM-Med2D checkpoint from {checkpoint_path}")
 
-        if not SAM2_AVAILABLE:
+        if not SAM_MED2D_AVAILABLE:
             raise ImportError(
-                "SAM2 is required for SAMMed2DVisionBackbone.\n"
-                "Install with: pip install 'git+https://github.com/facebookresearch/segment-anything-2.git'"
+                "SAM-Med2D is required for SAMMed2DVisionBackbone.\n"
+                "Install from: https://github.com/OpenGVLab/SAM-Med2D\n"
+                "Or install as package: pip install git+https://github.com/OpenGVLab/SAM-Med2D.git"
             )
 
-        # Build SAM2 model using the official config for hiera tiny
-        config_file = "configs/sam2.1/sam2.1_hiera_t.yaml"
-        print(f"[INFO] Building SAM2 model with config '{config_file}'...")
-        
+        # Determine model type from checkpoint path if not specified
+        if model_type is None:
+            checkpoint_lower = checkpoint_path.lower()
+            if "vit_h" in checkpoint_lower or "_h.pth" in checkpoint_lower or "huge" in checkpoint_lower:
+                model_type = "vit_h"
+            elif "vit_l" in checkpoint_lower or "_l.pth" in checkpoint_lower or "large" in checkpoint_lower:
+                model_type = "vit_l"
+            elif "vit_b" in checkpoint_lower or "_b.pth" in checkpoint_lower or "base" in checkpoint_lower:
+                model_type = "vit_b"
+            else:
+                # Default to vit_b, but warn user
+                model_type = "vit_b"
+                print(f"[WARNING] Could not determine model type from checkpoint path '{checkpoint_path}', defaulting to 'vit_b'")
+                print(f"[WARNING] If you get size mismatch errors, try specifying model_type explicitly (vit_b, vit_l, or vit_h)")
+
+        print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
+
+        # SAM-Med2D uses an args Namespace object for initialization
+        # Based on official SAM-Med2D implementation
+        args = Namespace()
+        args.image_size = image_size
+        args.encoder_adapter = True  # SAM-Med2D uses encoder adapter
+        args.sam_checkpoint = checkpoint_path
+
         # torch.load is already patched at module level for PyTorch 2.6+ compatibility
         # This allows loading checkpoints that contain optimizer states
-        try:
-            sam_model = build_sam2(
-                config_file=config_file,
-                ckpt_path=checkpoint_path,
-                device=self.device,
-            )
-            encoder = sam_model.image_encoder
-            print("[INFO] Successfully loaded SAM2 hiera_tiny image encoder")
-        except Exception as e:
+        sam_model = None
+        encoder = None
+        last_error = None
+        
+        # Try loading with the detected/specified model type
+        model_types_to_try = [model_type]
+        
+        # If auto-detection failed or we're unsure, try other variants
+        if model_type == "vit_b":
+            # Checkpoint might be misnamed - try vit_l if vit_b fails
+            model_types_to_try.extend(["vit_l", "vit_h"])
+        elif model_type == "vit_l":
+            model_types_to_try.extend(["vit_h", "vit_b"])
+        elif model_type == "vit_h":
+            model_types_to_try.extend(["vit_l", "vit_b"])
+        
+        for try_model_type in model_types_to_try:
+            try:
+                print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
+                sam_model = sam_model_registry[try_model_type](args)
+                encoder = sam_model.image_encoder
+                print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
+                model_type = try_model_type  # Update to the successful type
+                break
+            except KeyError:
+                raise ValueError(
+                    f"Invalid model type '{try_model_type}'. "
+                    f"Supported types: {list(sam_model_registry.keys())}"
+                )
+            except (RuntimeError, ValueError, KeyError) as e:
+                # Size mismatch or other loading error - try next type
+                last_error = e
+                if try_model_type != model_types_to_try[-1]:
+                    print(f"[WARNING] Failed to load with '{try_model_type}': {e}")
+                    print(f"[INFO] Trying next model type...")
+                    continue
+                else:
+                    # Last attempt failed
+                    raise RuntimeError(
+                        f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
+                        f"Tried: {model_types_to_try}\n"
+                        f"Last error: {e}\n"
+                        f"Please check that the checkpoint matches one of the model types: {list(sam_model_registry.keys())}"
+                    )
+        
+        if encoder is None:
             raise RuntimeError(
-                f"Failed to build SAM2 model from config '{config_file}' and checkpoint '{checkpoint_path}': {e}"
+                f"Failed to load SAM-Med2D model. Checkpoint: {checkpoint_path}, "
+                f"Last error: {last_error}"
             )
 
         self.encoder = encoder.to(self.device)
@@ -98,7 +174,7 @@ class SAMMed2DVisionBackbone(nn.Module):
             elif isinstance(dummy_output, (list, tuple)) and len(dummy_output) > 0:
                 encoder_channels = dummy_output[0].shape[1]
 
-            print(f"[INFO] Detected SAM2 encoder output channels: {encoder_channels}")
+            print(f"[INFO] Detected SAM-Med2D encoder output channels: {encoder_channels}")
 
         # Keep encoder unfrozen for medical fine-tuning
         for param in self.encoder.parameters():
@@ -158,14 +234,18 @@ class SAMMed2DVisionBackbone(nn.Module):
 
 
 if __name__ == "__main__":
-    # Test with your local SAM2 hiera tiny checkpoint
+    # Test with your local SAM-Med2D checkpoint
     try:
-        model = SAMMed2DVisionBackbone(checkpoint_path="weights/sam-med2d_b.pth")
+        model = SAMMed2DVisionBackbone(
+            checkpoint_path="weights/sam-med2d_b.pth",
+            model_type="vit_b",  # Can be vit_b, vit_l, or vit_h
+            image_size=1024
+        )
         dummy = torch.randn(2, 3, 1024, 1024)
         features = model(dummy)
         print("Output shape:", features.shape)
         print("Expected: (2, 256, 16, 16)")
     except Exception as e:
         print(f"Error: {e}")
-        print("Note: This requires SAM2 to be installed and a valid SAM2.1 hiera tiny checkpoint")
+        print("Note: This requires SAM-Med2D to be installed from https://github.com/OpenGVLab/SAM-Med2D")
 
