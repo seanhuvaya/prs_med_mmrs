@@ -71,7 +71,7 @@ fi
 # -----------------------------
 echo -e "${BLUE}Downloading dataset from public S3 bucket...${NC}"
 mkdir -p "$DATA_DOWNLOAD_DIR"
-aws s3 sync s3://prs-med-experiments/data/ "$DATA_DOWNLOAD_DIR"
+aws s3 cp s3://prs-med-experiments/data/ "$DATA_DOWNLOAD_DIR"
 
 # -----------------------------
 # Clone repository
