@@ -22,12 +22,12 @@ and installing dependencies using uv.
 Arguments:
   DATA_DOWNLOAD_DIR    Directory where the dataset will be downloaded
   PROJECT_REPO_DIR     Directory where the project repository will be cloned
-
+  WEIGHTS_DIR          Directory where the weights will be downloaded
 Options:
   -h, --help           Show this help message and exit
 
 Example:
-  $0 /workspace/data /workspace/prs_med_mmrs
+  $0 /workspace/data /workspace/prs_med_mmrs /workspace/weights
 EOF
 }
 
@@ -39,15 +39,15 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-if [[ $# -ne 2 ]]; then
-    echo -e "${RED}Error: Expected 2 arguments.${NC}\n"
+if [[ $# -ne 3 ]]; then
+    echo -e "${RED}Error: Expected 3 arguments.${NC}\n"
     usage
     exit 1
 fi
 
 DATA_DOWNLOAD_DIR="$1"
 PROJECT_REPO_DIR="$2"
-WEIGHTS_DIR="/workspace/weights"
+WEIGHTS_DIR="$3"
 SAM_MED2D_WEIGHT="sam2.1_hiera_large.pt"
 
 # -----------------------------
