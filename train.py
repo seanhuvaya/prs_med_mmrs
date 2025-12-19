@@ -153,9 +153,14 @@ def parse_args():
     parser.add_argument('--vlm_path', type=str, required=True,
                         help='Path to LLaVA-Med model (local path or Hugging Face ID like "microsoft/llava-med-v1.5-mistral-7b")')
     parser.add_argument('--sam_ckpt', type=str, required=True,
-                        help='Path to TinySAM checkpoint')
+                        help='Path to vision encoder checkpoint (TinySAM or SAM-Med2D)')
     parser.add_argument('--sam_model_type', type=str, default='vit_t',
-                        help='TinySAM model type (default: vit_t)')
+                        help='TinySAM model type (default: vit_t, ignored for SAM-Med2D)')
+    parser.add_argument('--encoder_type', type=str, default='tinysam',
+                        choices=['tinysam', 'sam_med2d', 'sammed2d'],
+                        help='Vision encoder type: tinysam or sam_med2d (default: tinysam)')
+    parser.add_argument('--image_size', type=int, default=1024,
+                        help='Input image size (default: 1024)')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=20,
@@ -196,6 +201,8 @@ if __name__ == "__main__":
         device=device,
         sam_model_type=args.sam_model_type,
         sam_checkpoint_path=args.sam_ckpt,
+        encoder_type=args.encoder_type,
+        image_size=args.image_size,
         cls_num_out=args.cls_num_out
     )
 

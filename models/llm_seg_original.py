@@ -10,6 +10,7 @@ from llava.utils import disable_torch_init
 from tinysam import sam_model_registry
 
 from .decoder.mask_decoder_original import PromptedMaskDecoder
+from .vision_backbone.sam_med2d_encoder import SAMMed2DVisionBackbone
 
 
 def custom_lora_init(module):
@@ -20,10 +21,24 @@ def custom_lora_init(module):
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, model_type, checkpoint_path):
+    def __init__(self, model_type, checkpoint_path, encoder_type="tinysam", device="cuda:0", image_size=1024):
         super(ImageEncoder, self).__init__()
-        self.sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-        self.image_encoder = self.sam.image_encoder
+        self.encoder_type = encoder_type.lower() if encoder_type else "tinysam"
+        self.device = device
+        
+        if self.encoder_type in ("sam_med2d", "sammed2d"):
+            # Use SAM-Med2D encoder
+            logging.info(f"Initializing SAM-Med2D encoder with checkpoint: {checkpoint_path}")
+            self.image_encoder = SAMMed2DVisionBackbone(
+                checkpoint_path=checkpoint_path,
+                image_size=image_size,
+                device=device
+            )
+        else:
+            # Use TinySAM encoder (default)
+            logging.info(f"Initializing TinySAM encoder with type {model_type} and checkpoint: {checkpoint_path}")
+            self.sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+            self.image_encoder = self.sam.image_encoder
 
     def forward(self, inputs):
         return self.image_encoder(inputs)
@@ -81,11 +96,21 @@ class LLMSeg(nn.Module):
         torch.nn.init.xavier_uniform_(self.cls[2].weight)
         torch.nn.init.ones_(self.cls[2].bias)
 
-    def set_image_encoder(self, model_type, checkpoint_path):
-        """Set the image encoder after initialization"""
+    def set_image_encoder(self, model_type, checkpoint_path, encoder_type="tinysam", image_size=1024):
+        """Set the image encoder after initialization
+        
+        Args:
+            model_type: Model type string (e.g., "vit_t" for TinySAM, ignored for SAM-Med2D)
+            checkpoint_path: Path to the checkpoint file
+            encoder_type: "tinysam" or "sam_med2d" (default: "tinysam")
+            image_size: Input image size (default: 1024)
+        """
         self.image_encoder = ImageEncoder(
             model_type=model_type,
-            checkpoint_path=checkpoint_path
+            checkpoint_path=checkpoint_path,
+            encoder_type=encoder_type,
+            device=self.device,
+            image_size=image_size
         )
         self.image_encoder.train()
 
@@ -212,6 +237,8 @@ def build_llm_seg(
         device="cuda:0",
         sam_model_type="vit_t",
         sam_checkpoint_path=None,
+        encoder_type="tinysam",
+        image_size=1024,
         cls_num_out=6
 ):
     llm_seg = LLMSeg(
@@ -224,7 +251,12 @@ def build_llm_seg(
     )
     
     if sam_checkpoint_path is not None:
-        llm_seg.set_image_encoder(sam_model_type, sam_checkpoint_path)
+        llm_seg.set_image_encoder(
+            sam_model_type, 
+            sam_checkpoint_path,
+            encoder_type=encoder_type,
+            image_size=image_size
+        )
 
     tokenizer, image_processor, context_len, config = llm_seg.get_model_utils()
     return llm_seg, tokenizer, image_processor, config

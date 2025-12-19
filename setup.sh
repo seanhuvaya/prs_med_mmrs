@@ -53,7 +53,7 @@ PROJECT_REPO_DIR="$2"
 # -----------------------------
 echo -e "${BLUE}Updating system and installing unzip...${NC}"
 apt update
-apt install -y unzip curl git
+apt install -y unzip curl git tmux
 
 # -----------------------------
 # Install AWS CLI (if missing)
