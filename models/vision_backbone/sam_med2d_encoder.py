@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision import transforms
+import functools
 
 # Try to import SAM2 (for SAM-Med2D based on SAM2)
 try:
@@ -39,6 +40,20 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         # Build SAM2 model using the official config for hiera tiny
         config_file = "configs/sam2.1/sam2.1_hiera_t.yaml"
+        
+        # Temporarily patch torch.load to use weights_only=False for PyTorch 2.6+ compatibility
+        # This is needed because SAM-Med2D checkpoints may contain optimizer states
+        original_torch_load = torch.load
+        @functools.wraps(original_torch_load)
+        def patched_torch_load(*args, **kwargs):
+            # If weights_only is not explicitly set, default to False for checkpoint loading
+            if 'weights_only' not in kwargs:
+                kwargs['weights_only'] = False
+            return original_torch_load(*args, **kwargs)
+        
+        # Apply the patch
+        torch.load = patched_torch_load
+        
         try:
             print(f"[INFO] Building SAM2 model with config '{config_file}'...")
             sam_model = build_sam2(
@@ -52,6 +67,9 @@ class SAMMed2DVisionBackbone(nn.Module):
             raise RuntimeError(
                 f"Failed to build SAM2 model from config '{config_file}' and checkpoint '{checkpoint_path}': {e}"
             )
+        finally:
+            # Always restore original torch.load
+            torch.load = original_torch_load
 
         self.encoder = encoder.to(self.device)
 
