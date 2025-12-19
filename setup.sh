@@ -47,11 +47,13 @@ fi
 
 DATA_DOWNLOAD_DIR="$1"
 PROJECT_REPO_DIR="$2"
+WEIGHTS_DIR="/workspace/weights"
+SAM_MED2D_WEIGHT="sam2.1_hiera_large.pt"
 
 # -----------------------------
 # Install system dependencies
 # -----------------------------
-echo -e "${BLUE}Updating system and installing unzip...${NC}"
+echo -e "${BLUE}Updating system and installing system dependencies...${NC}"
 apt update
 apt install -y unzip curl git tmux
 
@@ -66,12 +68,29 @@ if ! command -v aws >/dev/null 2>&1; then
 else
     echo -e "${GREEN}AWS CLI already installed. Skipping.${NC}"
 fi
+
 # -----------------------------
-# Download dataset
+# Download dataset (public S3)
 # -----------------------------
 echo -e "${BLUE}Downloading dataset from public S3 bucket...${NC}"
 mkdir -p "$DATA_DOWNLOAD_DIR"
 aws s3 sync s3://prs-med-experiments/data/ "$DATA_DOWNLOAD_DIR" --no-sign-request
+
+# -----------------------------
+# Download SAM-Med2D weights (public S3)
+# -----------------------------
+echo -e "${BLUE}Downloading SAM-Med2D weights...${NC}"
+mkdir -p "$WEIGHTS_DIR"
+
+if [[ ! -f "$WEIGHTS_DIR/$SAM_MED2D_WEIGHT" ]]; then
+    aws s3 cp \
+        s3://prs-med-experiments/weights/$SAM_MED2D_WEIGHT \
+        "$WEIGHTS_DIR/$SAM_MED2D_WEIGHT" \
+        --no-sign-request
+    echo -e "${GREEN}Weights downloaded successfully.${NC}"
+else
+    echo -e "${GREEN}Weights already exist. Skipping download.${NC}"
+fi
 
 # -----------------------------
 # Clone repository
@@ -94,5 +113,3 @@ cd "$PROJECT_REPO_DIR"
 uv sync
 
 echo -e "${GREEN}Setup completed successfully!${NC}"
-
-

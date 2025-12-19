@@ -3,7 +3,7 @@
 ## ⚙️ Setup environment
 Run the ```setup.sh``` script to automatically prepare the project environment:
 ```shell
-sh setup.sh <data_download_dir> <project_repo_dir>
+bash <(curl -Ls https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/code-refactor-with-sammed/setup.sh) <data_download_dir> <project_repo_dir>
 ```
 ### What the script does
 #### Downloads the dataset
