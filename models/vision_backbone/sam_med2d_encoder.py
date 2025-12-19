@@ -81,10 +81,29 @@ class SAMMed2DVisionBackbone(nn.Module):
             elif "vit_b" in checkpoint_lower or "_b.pth" in checkpoint_lower or "base" in checkpoint_lower:
                 model_type = "vit_b"
             else:
-                # Default to vit_b, but warn user
-                model_type = "vit_b"
-                print(f"[WARNING] Could not determine model type from checkpoint path '{checkpoint_path}', defaulting to 'vit_b'")
-                print(f"[WARNING] If you get size mismatch errors, try specifying model_type explicitly (vit_b, vit_l, or vit_h)")
+                # Try to determine from checkpoint dimensions
+                try:
+                    print(f"[INFO] Inspecting checkpoint to determine model type...")
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                    
+                    # Check for image_encoder.trunk dimensions
+                    if 'image_encoder.trunk.patch_embed.proj.weight' in checkpoint:
+                        embed_dim = checkpoint['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
+                        if embed_dim == 96:
+                            model_type = "vit_b"
+                        elif embed_dim == 144:
+                            model_type = "vit_l"
+                        elif embed_dim == 128:
+                            model_type = "vit_h"
+                        else:
+                            model_type = "vit_b"  # Default
+                            print(f"[WARNING] Unknown embed_dim {embed_dim}, defaulting to vit_b")
+                    else:
+                        model_type = "vit_b"
+                        print(f"[WARNING] Could not determine model type from checkpoint, defaulting to 'vit_b'")
+                except Exception as e:
+                    print(f"[WARNING] Could not inspect checkpoint: {e}, defaulting to 'vit_b'")
+                    model_type = "vit_b"
 
         print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
 
@@ -126,21 +145,27 @@ class SAMMed2DVisionBackbone(nn.Module):
                     f"Invalid model type '{try_model_type}'. "
                     f"Supported types: {list(sam_model_registry.keys())}"
                 )
-            except (RuntimeError, ValueError, KeyError) as e:
+            except (RuntimeError, ValueError) as e:
                 # Size mismatch or other loading error - try next type
                 last_error = e
-                if try_model_type != model_types_to_try[-1]:
-                    print(f"[WARNING] Failed to load with '{try_model_type}': {e}")
-                    print(f"[INFO] Trying next model type...")
-                    continue
-                else:
-                    # Last attempt failed
+                error_msg = str(e).lower()
+                # Check if it's a size mismatch or shape error
+                if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg):
+                    if try_model_type != model_types_to_try[-1]:
+                        print(f"[WARNING] Size/shape mismatch with '{try_model_type}', trying next model type...")
+                        continue
+                
+                # If it's the last attempt, raise the error
+                if try_model_type == model_types_to_try[-1]:
                     raise RuntimeError(
                         f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
                         f"Tried: {model_types_to_try}\n"
                         f"Last error: {e}\n"
                         f"Please check that the checkpoint matches one of the model types: {list(sam_model_registry.keys())}"
                     )
+                else:
+                    # Re-raise if it's not a size mismatch error
+                    raise
         
         if encoder is None:
             raise RuntimeError(
