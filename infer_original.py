@@ -297,7 +297,6 @@ def infer_single(
                 input_ids_for_seg=input_ids_for_seg,
                 image_tensor_for_vlm=image_tensor,
                 image_tensor_for_image_enc=image_tensor_for_sam,
-                attention_mask=None,
                 temperature=temperature,
                 max_new_tokens=max_new_tokens,
                 top_p=top_p

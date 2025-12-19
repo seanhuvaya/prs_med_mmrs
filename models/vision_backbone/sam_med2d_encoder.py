@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 import functools
-import sys
 from argparse import Namespace
 
 # Patch torch.load before importing SAM-Med2D to ensure compatibility with PyTorch 2.6+
@@ -19,26 +18,41 @@ def _patched_torch_load(f, *args, **kwargs):
 # Apply patch globally
 torch.load = _patched_torch_load
 
-# Try to import SAM-Med2D (official OpenGVLab implementation)
-# SAM-Med2D uses segment_anything module, not sam2
+# Import SAM-Med2D (installed as sam-med2d package via uv)
+# The package exposes segment_anything as top-level module
 try:
-    # Try importing from sam_med (if installed as a package)
+    from segment_anything import sam_model_registry
+except (ImportError, ModuleNotFoundError) as e:
+    error_str = str(e).lower()
+    error_msg = str(e)
+    
+    # Check if it's a missing modeling module error (incomplete package installation)
+    if "modeling" in error_str or ("no module named" in error_str and "segment_anything" in error_str):
+        raise ImportError(
+            "SAM-Med2D package is installed but incomplete. The 'modeling' module is missing.\n\n"
+            "This usually means the SAM-Med2D package's pyproject.toml doesn't include all necessary files.\n"
+            "Please check your forked SAM-Med2D repository and ensure the pyproject.toml includes:\n"
+            "  - segment_anything/modeling/ directory\n"
+            "  - All Python files in the segment_anything package\n\n"
+            "Example pyproject.toml configuration:\n"
+            "  [tool.setuptools]\n"
+            "  packages = find_packages()\n"
+            "  # OR explicitly:\n"
+            "  # packages = [\"segment_anything\", \"segment_anything.modeling\", ...]\n\n"
+            "After updating, reinstall with: uv sync\n"
+            f"Original error: {error_msg}"
+        ) from e
+    
+    # Try alternative import paths as fallback
     try:
-        from sam_med.segment_anything import sam_model_registry
-        SAM_MED2D_AVAILABLE = True
-        SAM_MED2D_SOURCE = "sam_med"
-    except ImportError:
-        # Try importing from segment_anything (if SAM-Med2D repo is in path)
-        try:
-            from segment_anything import sam_model_registry
-            SAM_MED2D_AVAILABLE = True
-            SAM_MED2D_SOURCE = "segment_anything"
-        except ImportError:
-            SAM_MED2D_AVAILABLE = False
-            SAM_MED2D_SOURCE = None
-except Exception:
-    SAM_MED2D_AVAILABLE = False
-    SAM_MED2D_SOURCE = None
+        from sam_med2d.segment_anything import sam_model_registry
+    except (ImportError, ModuleNotFoundError):
+        raise ImportError(
+            "SAM-Med2D (sam-med2d) is required but not found.\n"
+            "Install it by running: uv sync\n"
+            "Make sure sam-med2d is in your pyproject.toml dependencies.\n"
+            f"Import error: {error_msg}"
+        ) from e
 
 
 class SAMMed2DVisionBackbone(nn.Module):
@@ -64,46 +78,52 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         print(f"[INFO] Loading SAM-Med2D checkpoint from {checkpoint_path}")
 
-        if not SAM_MED2D_AVAILABLE:
-            raise ImportError(
-                "SAM-Med2D is required for SAMMed2DVisionBackbone.\n"
-                "Install from: https://github.com/OpenGVLab/SAM-Med2D\n"
-                "Or install as package: pip install git+https://github.com/OpenGVLab/SAM-Med2D.git"
-            )
-
-        # Determine model type from checkpoint path if not specified
+        # Determine model type from checkpoint if not specified
+        # Priority: 1) Checkpoint inspection, 2) Filename, 3) Default
         if model_type is None:
-            checkpoint_lower = checkpoint_path.lower()
-            if "vit_h" in checkpoint_lower or "_h.pth" in checkpoint_lower or "huge" in checkpoint_lower:
-                model_type = "vit_h"
-            elif "vit_l" in checkpoint_lower or "_l.pth" in checkpoint_lower or "large" in checkpoint_lower:
-                model_type = "vit_l"
-            elif "vit_b" in checkpoint_lower or "_b.pth" in checkpoint_lower or "base" in checkpoint_lower:
-                model_type = "vit_b"
-            else:
-                # Try to determine from checkpoint dimensions
-                try:
-                    print(f"[INFO] Inspecting checkpoint to determine model type...")
-                    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-                    
-                    # Check for image_encoder.trunk dimensions
-                    if 'image_encoder.trunk.patch_embed.proj.weight' in checkpoint:
-                        embed_dim = checkpoint['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
-                        if embed_dim == 96:
-                            model_type = "vit_b"
-                        elif embed_dim == 144:
-                            model_type = "vit_l"
-                        elif embed_dim == 128:
-                            model_type = "vit_h"
-                        else:
-                            model_type = "vit_b"  # Default
-                            print(f"[WARNING] Unknown embed_dim {embed_dim}, defaulting to vit_b")
-                    else:
+            # First, try to determine from checkpoint dimensions (most reliable)
+            try:
+                print(f"[INFO] Inspecting checkpoint to determine model type...")
+                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                
+                # Check for image_encoder.trunk dimensions (SAM-Med2D structure)
+                if 'image_encoder.trunk.patch_embed.proj.weight' in checkpoint:
+                    embed_dim = checkpoint['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
+                    if embed_dim == 96:
                         model_type = "vit_b"
-                        print(f"[WARNING] Could not determine model type from checkpoint, defaulting to 'vit_b'")
-                except Exception as e:
-                    print(f"[WARNING] Could not inspect checkpoint: {e}, defaulting to 'vit_b'")
+                        print(f"[INFO] Detected vit_b from checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 144:
+                        model_type = "vit_l"
+                        print(f"[INFO] Detected vit_l from checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 128:
+                        model_type = "vit_h"
+                        print(f"[INFO] Detected vit_h from checkpoint (embed_dim={embed_dim})")
+                    else:
+                        print(f"[WARNING] Unknown embed_dim {embed_dim}, will try to infer from filename")
+                        model_type = None  # Will try filename next
+                else:
+                    print(f"[WARNING] Could not find image_encoder.trunk in checkpoint, will try filename")
+                    model_type = None  # Will try filename next
+            except Exception as e:
+                print(f"[WARNING] Could not inspect checkpoint: {e}, will try filename")
+                model_type = None  # Will try filename next
+            
+            # If checkpoint inspection didn't work, try filename
+            if model_type is None:
+                checkpoint_lower = checkpoint_path.lower()
+                if "vit_h" in checkpoint_lower or "_h.pth" in checkpoint_lower or "huge" in checkpoint_lower:
+                    model_type = "vit_h"
+                    print(f"[INFO] Detected vit_h from filename")
+                elif "vit_l" in checkpoint_lower or "_l.pth" in checkpoint_lower or "large" in checkpoint_lower:
+                    model_type = "vit_l"
+                    print(f"[INFO] Detected vit_l from filename")
+                elif "vit_b" in checkpoint_lower or "_b.pth" in checkpoint_lower or "base" in checkpoint_lower:
                     model_type = "vit_b"
+                    print(f"[INFO] Detected vit_b from filename")
+                else:
+                    # Default to vit_b
+                    model_type = "vit_b"
+                    print(f"[WARNING] Could not determine model type, defaulting to 'vit_b'")
 
         print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
 

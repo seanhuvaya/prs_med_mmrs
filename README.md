@@ -21,6 +21,16 @@ uv run python -m infer_original \
     --num_samples 10
 ```
 
+```shell
+uv run python -m infer_original \
+    --checkpoint /workspace/checkpoints/llm_seg_best_model_epoch_20 \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --data_root /workspace/data/prs-med-dataset \
+    --ann_paths "/workspace/data/prs-med-dataset/annotations/brain_tumors_ct_scan.csv,/workspace/data/prs-med-dataset/annotations/breast_tumors_ct_scan.csv,/workspace/data/prs-med-dataset/annotations/lung_CT.csv,/workspace/data/prs-med-dataset/annotations/lung_Xray.csv,/workspace/data/prs-med-dataset/annotations/polyp_endoscopy.csv,/workspace/data/prs-med-dataset/annotations/skin_rgbimage.csv" \
+    --split test
+```
+
 ```bash
 curl -fsSL --no-buffer -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://raw.githubusercontent.com/seanhuvaya/prs_med_mmrs/refs/heads/master/train.sh \
   | bash -s -- \

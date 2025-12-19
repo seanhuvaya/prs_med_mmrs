@@ -7,3 +7,4 @@ checkpoints/
 **/__pycache__/
 weights/sam2.1_hiera_tiny.pt
 weights/sam2.1_hiera_large.pt
+weights/sam-med2d_b.pth

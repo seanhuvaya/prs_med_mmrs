@@ -1407,6 +1407,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pytest" },
     { name = "sam-2" },
+    { name = "sam-med2d" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "sentencepiece" },
@@ -1431,6 +1432,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.1.3" },
     { name = "pytest", specifier = ">=9.0.1" },
     { name = "sam-2", git = "https://github.com/facebookresearch/segment-anything-2.git" },
+    { name = "sam-med2d", git = "https://github.com/seanhuvaya/SAM-Med2D.git" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.11.0" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
@@ -1918,6 +1920,19 @@ dependencies = [
     { name = "torch" },
     { name = "torchvision" },
     { name = "tqdm" },
+]
+
+[[package]]
+name = "sam-med2d"
+version = "0.1.0"
+source = { git = "https://github.com/seanhuvaya/SAM-Med2D.git#15cbf0db21cf22645a3ecd1948bf09041f213c1a" }
+dependencies = [
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "timm" },
+    { name = "torch" },
+    { name = "torchvision" },
 ]
 
 [[package]]

@@ -1,0 +1,41 @@
+# Template pyproject.toml for SAM-Med2D
+# Add this file to your forked SAM-Med2D repository to make it installable
+# 
+# Steps:
+# 1. Fork https://github.com/OpenGVLab/SAM-Med2D
+# 2. Add this file as pyproject.toml in the root of the forked repo
+# 3. Update the git URL in your prs_med_mmrs/pyproject.toml to point to your fork
+
+[project]
+name = "sam-med2d"
+version = "0.1.0"
+description = "SAM-Med2D: Segment Anything in 2D Medical Imaging"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "numpy>=1.20.0",
+    "opencv-python>=4.5.0",
+    "pillow>=8.0.0",
+    "timm>=0.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Use find_packages to automatically discover all packages including subpackages
+packages = { find = {} }
+# OR explicitly list all packages (if find_packages doesn't work):
+# packages = ["segment_anything", "segment_anything.modeling"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.txt", "*.md"]
+
