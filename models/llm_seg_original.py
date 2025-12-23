@@ -169,7 +169,16 @@ class LLMSeg(nn.Module):
 
             image_embedding = self.image_encoder(image_tensor_for_image_enc)
             
-            prompt_embedding = self.base_model.extract_last_hidden_state(
+            # After load_model(), self.model has merged LoRA weights
+            # Use self.model if it has extract_last_hidden_state, otherwise use base_model
+            # This ensures we use the merged weights (important for correct inference)
+            if hasattr(self.model, 'extract_last_hidden_state'):
+                model_for_embedding = self.model
+            else:
+                # Fallback to base_model if merged model doesn't have the method
+                model_for_embedding = self.base_model
+            
+            prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids = input_ids_for_seg if input_ids_for_seg is not None else input_ids,
                 images = image_tensor_for_vlm,
                 do_sample=False,
@@ -177,6 +186,17 @@ class LLMSeg(nn.Module):
                 max_new_tokens=max_new_tokens,
                 top_p=top_p
             )["hidden_states"][-1]
+            
+            # Validate embeddings before passing to mask_decoder
+            if torch.isnan(prompt_embedding).any() or torch.isinf(prompt_embedding).any():
+                raise RuntimeError(
+                    f"NaN/Inf detected in prompt_embedding. "
+                    f"Shape: {prompt_embedding.shape}, "
+                    f"Model used: {'self.model' if hasattr(self.model, 'extract_last_hidden_state') else 'self.base_model'}"
+                )
+            if torch.isnan(image_embedding).any() or torch.isinf(image_embedding).any():
+                raise RuntimeError(f"NaN/Inf detected in image_embedding. Shape: {image_embedding.shape}")
+            
             final_mask = self.mask_decoder(
                 image_embedding, prompt_embedding
             )
