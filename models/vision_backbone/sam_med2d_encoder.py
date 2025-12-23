@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 import functools
+from argparse import Namespace
 
 # Patch torch.load before importing SAM-Med2D to ensure compatibility with PyTorch 2.6+
 # This allows loading checkpoints that contain optimizer states
@@ -155,139 +156,53 @@ class SAMMed2DVisionBackbone(nn.Module):
                     model_type = "vit_b"
                     print(f"[WARNING] Could not determine model type, defaulting to 'vit_b'")
 
-        print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
-
-        # Extract checkpoint first if it's a training checkpoint, then detect model type from extracted state_dict
+        print(f"[INFO] Model type: {model_type}, Target image size: {image_size}")
+        
+        # SAM-Med2D uses image_size=256 by default (as per their repo)
+        # We'll load it with their default size, then wrap it to handle PRS-Med's 1024x1024 requirement
+        sam_med2d_image_size = 256  # SAM-Med2D default
+        
+        # Check if checkpoint is a training checkpoint and extract model state_dict if needed
         import tempfile
         import os
-        
         checkpoint_to_use = checkpoint_path
         temp_checkpoint_path = None
-        extracted_state_dict = None
         
         try:
             checkpoint_data = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            
-            # Check if this is a training checkpoint with "model" key
             if isinstance(checkpoint_data, dict) and "model" in checkpoint_data:
-                print(f"[INFO] Detected training checkpoint format (has 'model' key), extracting model state_dict...")
+                print(f"[INFO] Detected training checkpoint format, extracting model state_dict...")
                 model_state_dict = checkpoint_data["model"]
                 
-                # Check if model_state_dict contains SAM model keys directly
-                # SAM model keys typically start with: image_encoder, prompt_encoder, mask_decoder
-                has_sam_keys = any(
+                # Check if nested further
+                if isinstance(model_state_dict, dict) and not any(
                     key.startswith("image_encoder") or 
                     key.startswith("prompt_encoder") or 
                     key.startswith("mask_decoder")
                     for key in model_state_dict.keys()
-                )
+                ):
+                    # Try common nested keys
+                    for key in ["state_dict", "model_state_dict", "model", "sam_model"]:
+                        if key in model_state_dict and isinstance(model_state_dict[key], dict):
+                            model_state_dict = model_state_dict[key]
+                            break
                 
-                if has_sam_keys:
-                    # Direct SAM model state_dict - use it directly
-                    extracted_state_dict = model_state_dict
-                else:
-                    # Check if it's a nested structure (e.g., model wrapped in another layer)
-                    # Try common nested structures
-                    if isinstance(model_state_dict, dict):
-                        # Check for common wrapper keys
-                        for key in ["state_dict", "model_state_dict", "model", "sam_model"]:
-                            if key in model_state_dict:
-                                nested = model_state_dict[key]
-                                if isinstance(nested, dict) and any(
-                                    k.startswith("image_encoder") or 
-                                    k.startswith("prompt_encoder") or 
-                                    k.startswith("mask_decoder")
-                                    for k in nested.keys()
-                                ):
-                                    extracted_state_dict = nested
-                                    print(f"[INFO] Found SAM model state_dict nested under '{key}' key")
-                                    break
-                        else:
-                            # If no nested structure found, use the model_state_dict as-is
-                            # It might be the actual state_dict but with different key structure
-                            extracted_state_dict = model_state_dict
-                            print(f"[WARNING] Could not find standard SAM keys, using model state_dict as-is")
-                    else:
-                        extracted_state_dict = model_state_dict
-                
-                # Always re-detect model type from extracted state_dict to ensure accuracy
-                print(f"[INFO] Detecting model type from extracted state_dict...")
-                detected_type = None
-                # Check for image_encoder.trunk dimensions (SAM-Med2D structure)
-                if 'image_encoder.trunk.patch_embed.proj.weight' in extracted_state_dict:
-                    embed_dim = extracted_state_dict['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
-                    if embed_dim == 96:
-                        detected_type = "vit_b"
-                        print(f"[INFO] Detected vit_b from extracted checkpoint (embed_dim={embed_dim})")
-                    elif embed_dim == 144:
-                        detected_type = "vit_l"
-                        print(f"[INFO] Detected vit_l from extracted checkpoint (embed_dim={embed_dim})")
-                    elif embed_dim == 128:
-                        detected_type = "vit_h"
-                        print(f"[INFO] Detected vit_h from extracted checkpoint (embed_dim={embed_dim})")
-                # Also check for standard SAM structure (without trunk)
-                elif 'image_encoder.patch_embed.proj.weight' in extracted_state_dict:
-                    embed_dim = extracted_state_dict['image_encoder.patch_embed.proj.weight'].shape[0]
-                    if embed_dim == 768:
-                        detected_type = "vit_b"
-                        print(f"[INFO] Detected vit_b from extracted checkpoint (embed_dim={embed_dim})")
-                    elif embed_dim == 1024:
-                        detected_type = "vit_l"
-                        print(f"[INFO] Detected vit_l from extracted checkpoint (embed_dim={embed_dim})")
-                    elif embed_dim == 1280:
-                        detected_type = "vit_h"
-                        print(f"[INFO] Detected vit_h from extracted checkpoint (embed_dim={embed_dim})")
-                
-                # Use detected type if found, otherwise keep the original detection
-                if detected_type is not None:
-                    if model_type is not None and model_type != detected_type:
-                        print(f"[WARNING] Model type mismatch: previously detected '{model_type}', but extracted checkpoint suggests '{detected_type}'. Using '{detected_type}'.")
-                    model_type = detected_type
-                elif model_type is None:
-                    # If we couldn't detect from extracted state_dict and no previous detection, default to vit_b
-                    model_type = "vit_b"
-                    print(f"[WARNING] Could not detect model type from extracted checkpoint, defaulting to 'vit_b'")
-                
-                # Save extracted state_dict to temporary file for SAM to load
+                # Save extracted state_dict to temporary file
                 temp_checkpoint = tempfile.NamedTemporaryFile(delete=False, suffix='.pth')
                 temp_checkpoint_path = temp_checkpoint.name
                 temp_checkpoint.close()
-                torch.save(extracted_state_dict, temp_checkpoint_path)
-                print(f"[INFO] Saved extracted model state_dict to temporary file: {temp_checkpoint_path}")
+                torch.save(model_state_dict, temp_checkpoint_path)
                 checkpoint_to_use = temp_checkpoint_path
-            elif isinstance(checkpoint_data, dict) and any(
-                key.startswith("image_encoder") or 
-                key.startswith("prompt_encoder") or 
-                key.startswith("mask_decoder")
-                for key in checkpoint_data.keys()
-            ):
-                # Direct SAM model state_dict - use as is
-                print(f"[INFO] Checkpoint appears to be a direct SAM model state_dict")
-                checkpoint_to_use = checkpoint_path
-                # Re-detect model type if not already detected
-                if model_type is None or model_type == "vit_b":
-                    if 'image_encoder.patch_embed.proj.weight' in checkpoint_data:
-                        embed_dim = checkpoint_data['image_encoder.patch_embed.proj.weight'].shape[0]
-                        if embed_dim == 768:
-                            model_type = "vit_b"
-                            print(f"[INFO] Detected vit_b from checkpoint (embed_dim={embed_dim})")
-                        elif embed_dim == 1024:
-                            model_type = "vit_l"
-                            print(f"[INFO] Detected vit_l from checkpoint (embed_dim={embed_dim})")
-                        elif embed_dim == 1280:
-                            model_type = "vit_h"
-                            print(f"[INFO] Detected vit_h from checkpoint (embed_dim={embed_dim})")
-            else:
-                # Unknown structure - try using as-is
-                print(f"[INFO] Checkpoint structure unclear, attempting to load as-is")
-                checkpoint_to_use = checkpoint_path
+                print(f"[INFO] Saved extracted model state_dict to temporary file")
         except Exception as e:
-            print(f"[WARNING] Could not inspect checkpoint structure: {e}, using checkpoint as-is")
-            checkpoint_to_use = checkpoint_path
-
-        # SAM-Med2D registry expects checkpoint as a keyword argument
-        # torch.load is already patched at module level for PyTorch 2.6+ compatibility
-        # This allows loading checkpoints that contain optimizer states
+            print(f"[WARNING] Could not check checkpoint format: {e}, using checkpoint as-is")
+        
+        # Prepare args object as SAM-Med2D expects (from https://github.com/OpenGVLab/SAM-Med2D)
+        args = Namespace()
+        args.image_size = sam_med2d_image_size
+        args.encoder_adapter = True  # SAM-Med2D checkpoints use adapter layers
+        args.sam_checkpoint = checkpoint_to_use
+        
         sam_model = None
         encoder = None
         last_error = None
@@ -302,125 +217,69 @@ class SAMMed2DVisionBackbone(nn.Module):
             model_types_to_try = [model_type]
             print(f"[INFO] Will try loading with detected model type: {model_type}")
         
-        # Detect checkpoint image size from position embeddings
-        checkpoint_image_size = None
-        try:
-            checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
-            if 'image_encoder.pos_embed' in checkpoint_state:
-                pos_embed_shape = checkpoint_state['image_encoder.pos_embed'].shape
-                # pos_embed shape is [1, H, W, C] where H=W=image_size/patch_size
-                # patch_size is typically 16 for SAM
-                if len(pos_embed_shape) == 4:
-                    patch_h, patch_w = pos_embed_shape[1], pos_embed_shape[2]
-                    checkpoint_image_size = patch_h * 16  # Assuming patch_size=16
-                    print(f"[INFO] Detected checkpoint image size: {checkpoint_image_size}x{checkpoint_image_size} (from pos_embed shape {pos_embed_shape})")
-        except Exception as e:
-            print(f"[WARNING] Could not detect checkpoint image size: {e}")
-        
-        # If checkpoint has different image size, we'll need to resize position embeddings
-        needs_resize = checkpoint_image_size is not None and checkpoint_image_size != image_size
-        
-        try:
-            for try_model_type in model_types_to_try:
-                try:
-                    print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
-                    
-                    # Build model without checkpoint first if we need to resize
-                    if needs_resize:
-                        print(f"[INFO] Checkpoint image size ({checkpoint_image_size}) differs from target ({image_size}), will resize position embeddings")
-                        # Build model without loading checkpoint
-                        sam_model = sam_model_registry[try_model_type](checkpoint=None)
-                        
-                        # Load checkpoint state dict
-                        checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
-                        
-                        # Resize position embeddings
-                        if 'image_encoder.pos_embed' in checkpoint_state:
-                            old_pos_embed = checkpoint_state['image_encoder.pos_embed']
-                            # old_pos_embed shape: [1, H_old, W_old, C]
-                            # new_pos_embed shape: [1, H_new, W_new, C]
-                            old_h, old_w = old_pos_embed.shape[1], old_pos_embed.shape[2]
-                            new_h = image_size // 16  # patch_size = 16
-                            new_w = image_size // 16
-                            
-                            # Resize using interpolation
-                            old_pos_embed_2d = old_pos_embed.squeeze(0).permute(2, 0, 1)  # [C, H, W]
-                            new_pos_embed_2d = torch.nn.functional.interpolate(
-                                old_pos_embed_2d.unsqueeze(0),
-                                size=(new_h, new_w),
-                                mode='bilinear',
-                                align_corners=False
-                            ).squeeze(0)  # [C, H_new, W_new]
-                            new_pos_embed = new_pos_embed_2d.permute(1, 2, 0).unsqueeze(0)  # [1, H_new, W_new, C]
-                            checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
-                            print(f"[INFO] Resized pos_embed from [{old_h}, {old_w}] to [{new_h}, {new_w}]")
-                        
-                        # Resize relative position embeddings
-                        # rel_pos_h and rel_pos_w have shape [2*H-1, head_dim] or [2*W-1, head_dim]
-                        for key in list(checkpoint_state.keys()):
-                            if 'rel_pos_h' in key or 'rel_pos_w' in key:
-                                old_rel_pos = checkpoint_state[key]
-                                if len(old_rel_pos.shape) == 2:
-                                    # Shape: [2*H-1, head_dim]
-                                    old_size = (old_rel_pos.shape[0] + 1) // 2
-                                    new_size = image_size // 16
-                                    new_rel_pos_size = 2 * new_size - 1
-                                    
-                                    # Interpolate relative position embeddings
-                                    # We need to handle the 1D nature of these embeddings
-                                    old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
-                                    new_rel_pos_expanded = torch.nn.functional.interpolate(
-                                        old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
-                                        size=(1, new_rel_pos_size),
-                                        mode='bilinear',
-                                        align_corners=False
-                                    ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
-                                    checkpoint_state[key] = new_rel_pos_expanded
-                                    print(f"[INFO] Resized {key} from [{old_rel_pos.shape[0]}] to [{new_rel_pos_size}]")
-                        
-                        # Load the resized state dict
-                        missing_keys, unexpected_keys = sam_model.load_state_dict(checkpoint_state, strict=False)
-                        if missing_keys:
-                            print(f"[WARNING] Missing keys when loading checkpoint: {len(missing_keys)} keys")
-                        if unexpected_keys:
-                            print(f"[WARNING] Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
-                    else:
-                        # Normal loading path
-                        sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_to_use)
-                    
-                    encoder = sam_model.image_encoder
-                    print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
-                    model_type = try_model_type  # Update to the successful type
-                    break
-                except KeyError:
-                    raise ValueError(
-                        f"Invalid model type '{try_model_type}'. "
-                        f"Supported types: {list(sam_model_registry.keys())}"
+        # Try loading SAM-Med2D using their official API
+        for try_model_type in model_types_to_try:
+            try:
+                print(f"[INFO] Loading SAM-Med2D model with type '{try_model_type}' using official API...")
+                print(f"[INFO] Using args: image_size={args.image_size}, encoder_adapter={args.encoder_adapter}, checkpoint={args.sam_checkpoint}")
+                
+                # Load using SAM-Med2D's official API: sam_model_registry[model_type](args)
+                # This is how SAM-Med2D loads models according to their repository
+                sam_model = sam_model_registry[try_model_type](args)
+                encoder = sam_model.image_encoder
+                
+                print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
+                model_type = try_model_type  # Update to the successful type
+                break
+            except KeyError:
+                raise ValueError(
+                    f"Invalid model type '{try_model_type}'. "
+                    f"Supported types: {list(sam_model_registry.keys())}"
+                )
+            except (RuntimeError, ValueError, TypeError) as e:
+                # Check if the error is because sam_model_registry doesn't accept args
+                # In that case, fall back to checkpoint-based loading
+                error_msg = str(e).lower()
+                last_error = e
+                
+                if "unexpected keyword argument" in error_msg or "takes" in error_msg and "positional" in error_msg:
+                    print(f"[WARNING] SAM-Med2D registry doesn't accept args, trying checkpoint-based loading...")
+                    # Fall back to checkpoint-based loading
+                    try:
+                        sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
+                        encoder = sam_model.image_encoder
+                        print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} using checkpoint-based loading")
+                        model_type = try_model_type
+                        break
+                    except Exception as e2:
+                        last_error = e2
+                        if try_model_type == model_types_to_try[-1]:
+                            raise RuntimeError(
+                                f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}'.\n"
+                                f"Tried both args-based and checkpoint-based loading.\n"
+                                f"Last error: {e2}"
+                            )
+                        continue
+                
+                # If we detected a specific model type, don't try others
+                if len(model_types_to_try) == 1:
+                    raise RuntimeError(
+                        f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with detected model type '{try_model_type}'.\n"
+                        f"Error: {e}\n"
+                        f"This suggests either:\n"
+                        f"  1. The checkpoint is corrupted or incomplete\n"
+                        f"  2. The checkpoint is for a different model architecture\n"
+                        f"  3. The model type detection was incorrect\n"
+                        f"Please verify the checkpoint file and model type."
                     )
-                except (RuntimeError, ValueError) as e:
-                    # Size mismatch or other loading error
-                    last_error = e
-                    error_msg = str(e).lower()
-                    
-                    # If we detected a specific model type, don't try others - the detection was wrong or checkpoint is corrupted
-                    if len(model_types_to_try) == 1:
-                        raise RuntimeError(
-                            f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with detected model type '{try_model_type}'.\n"
-                            f"Error: {e}\n"
-                            f"This suggests either:\n"
-                            f"  1. The checkpoint is corrupted or incomplete\n"
-                            f"  2. The checkpoint is for a different model architecture\n"
-                            f"  3. The model type detection was incorrect\n"
-                            f"Please verify the checkpoint file and model type."
-                        )
-                    
-                    # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
-                    if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
-                        if try_model_type != model_types_to_try[-1]:
-                            print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
-                            continue
-                    
-                    # If it's the last attempt, raise the error
+                
+                # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
+                if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
+                    if try_model_type != model_types_to_try[-1]:
+                        print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
+                        continue
+                
+                # If it's the last attempt, raise the error
                     if try_model_type == model_types_to_try[-1]:
                         raise RuntimeError(
                             f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
@@ -447,11 +306,13 @@ class SAMMed2DVisionBackbone(nn.Module):
             )
 
         self.encoder = encoder.to(self.device)
+        self.sam_med2d_image_size = sam_med2d_image_size  # Store SAM-Med2D's native image size
+        self.target_image_size = image_size  # PRS-Med's target image size
 
-        # Detect output channels by running a dummy forward pass
+        # Detect output channels by running a dummy forward pass with SAM-Med2D's native size
         encoder_channels = 1280  # sensible default
         with torch.no_grad():
-            dummy_input = torch.randn(1, 3, image_size, image_size).to(self.device)
+            dummy_input = torch.randn(1, 3, sam_med2d_image_size, sam_med2d_image_size).to(self.device)
             dummy_output = self.encoder(dummy_input)
 
             # Some SAM/SAM2 variants return dicts; extract the main image embedding
@@ -478,9 +339,10 @@ class SAMMed2DVisionBackbone(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
-        # Define preprocessing consistent with SAM training (ImageNet stats)
+        # Define preprocessing: resize to SAM-Med2D's native size (256x256), then normalize
+        # This ensures compatibility with SAM-Med2D's trained weights
         self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
+            transforms.Resize((sam_med2d_image_size, sam_med2d_image_size)),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -490,13 +352,59 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         # Project to 256 channels to match TinySAM output
         self.output_proj = nn.Conv2d(encoder_channels, 256, kernel_size=1).to(self.device)
+        
+        # Store target size for output resizing if needed
+        self.target_image_size = image_size
 
     def forward(self, x):
+        """
+        Forward pass that wraps SAM-Med2D for PRS-Med compatibility.
+        
+        SAM-Med2D expects 256x256 input, but PRS-Med uses 1024x1024.
+        This wrapper:
+        1. Resizes input from 1024x1024 to 256x256 (SAM-Med2D's native size)
+        2. Processes through SAM-Med2D encoder
+        3. Projects to 256 channels and resizes to 16x16 to match TinySAM output format
+        """
         if isinstance(x, list):
-            x = torch.stack([self.transform(img) for img in x])
+            # Handle PIL images or tensors in list
+            processed = []
+            for img in x:
+                if isinstance(img, torch.Tensor):
+                    # If tensor, resize and normalize
+                    if img.dim() == 3:
+                        img = img.unsqueeze(0)
+                    # Resize to SAM-Med2D's native size
+                    img = torch.nn.functional.interpolate(
+                        img, 
+                        size=(self.sam_med2d_image_size, self.sam_med2d_image_size),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    # Normalize if needed
+                    if img.max() > 2.0:
+                        img = img / 255.0
+                    mean = torch.tensor([0.485, 0.456, 0.406], device=img.device).view(1, 3, 1, 1)
+                    std = torch.tensor([0.229, 0.224, 0.225], device=img.device).view(1, 3, 1, 1)
+                    img = (img - mean) / std
+                    processed.append(img.squeeze(0))
+                else:
+                    processed.append(self.transform(img))
+            x = torch.stack(processed)
         elif isinstance(x, torch.Tensor):
-            # If tensor is already ImageNet-normalized (can have values outside [0,1]),
-            # assume it's ready. Otherwise, if values are in [0, 255] range, normalize.
+            # Handle tensor input
+            original_size = x.shape[-2:]
+            
+            # Resize to SAM-Med2D's native size (256x256) if needed
+            if original_size != (self.sam_med2d_image_size, self.sam_med2d_image_size):
+                x = torch.nn.functional.interpolate(
+                    x,
+                    size=(self.sam_med2d_image_size, self.sam_med2d_image_size),
+                    mode='bilinear',
+                    align_corners=False
+                )
+            
+            # Normalize if needed (check if already normalized)
             if x.max() > 2.0:
                 # Likely unnormalized [0, 255] range
                 x = x / 255.0
@@ -506,6 +414,7 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         x = x.to(self.device)
 
+        # Forward through SAM-Med2D encoder (expects 256x256 input)
         with torch.set_grad_enabled(self.training):
             z_image = self.encoder(x)
 
@@ -524,7 +433,9 @@ class SAMMed2DVisionBackbone(nn.Module):
         # Project to 256 channels
         z_image = self.output_proj(z_image)
 
-        # Ensure output is 16x16 to match TinySAM
+        # Ensure output is 16x16 to match TinySAM output format
+        # SAM-Med2D outputs 16x16 features for 256x256 input (256/16=16)
+        # We need to maintain 16x16 for PRS-Med compatibility
         if z_image.shape[-2:] != (16, 16):
             z_image = torch.nn.functional.adaptive_avg_pool2d(z_image, (16, 16))
 
