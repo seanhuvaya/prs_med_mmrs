@@ -171,6 +171,27 @@ class LLMSeg(nn.Module):
             if base_dtype == torch.bfloat16 or base_dtype == torch.float32:
                 self.base_model = self.base_model.to(dtype=torch.float16)
         
+        # CRITICAL: Explicitly convert vision tower to float16
+        # The vision tower outputs are converted back to input dtype in clip_encoder.py line 49,
+        # so we need to ensure both vision tower AND its inputs are in float16
+        try:
+            vision_tower = self.model.get_vision_tower() if hasattr(self.model, 'get_vision_tower') else None
+            if vision_tower is None and hasattr(self, 'base_model'):
+                vision_tower = self.base_model.get_vision_tower() if hasattr(self.base_model, 'get_vision_tower') else None
+            
+            if vision_tower is not None:
+                # Convert vision tower to float16
+                if hasattr(vision_tower, 'to'):
+                    vision_tower = vision_tower.to(dtype=torch.float16)
+                elif hasattr(vision_tower, 'vision_tower'):
+                    # Handle case where vision_tower is a wrapper
+                    if hasattr(vision_tower.vision_tower, 'to'):
+                        vision_tower.vision_tower = vision_tower.vision_tower.to(dtype=torch.float16)
+        except Exception as e:
+            # If vision tower conversion fails, log but continue (might not be critical)
+            import logging
+            logging.warning(f"Could not convert vision tower to float16: {e}")
+        
         with torch.no_grad():
             # Ensure image_tensor_for_vlm is in float16 to match model
             # Get dtype from model (should be float16 after conversion above)
@@ -198,9 +219,27 @@ class LLMSeg(nn.Module):
                 # Fallback to base_model if merged model doesn't have the method
                 model_for_embedding = self.base_model
             
-            # Ensure image_tensor_for_vlm matches model dtype (double-check)
-            if image_tensor_for_vlm.dtype != next(model_for_embedding.parameters()).dtype:
-                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=next(model_for_embedding.parameters()).dtype)
+            # CRITICAL: Ensure image_tensor_for_vlm is in float16
+            # The vision tower converts outputs to match input dtype (clip_encoder.py line 49),
+            # so if images are float32, vision tower outputs will be float32, causing mismatch with mm_projector (float16)
+            target_dtype = next(model_for_embedding.parameters()).dtype
+            if image_tensor_for_vlm.dtype != target_dtype:
+                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=target_dtype)
+            
+            # Also ensure vision tower is in float16 to match
+            try:
+                vision_tower = model_for_embedding.get_vision_tower() if hasattr(model_for_embedding, 'get_vision_tower') else None
+                if vision_tower is not None:
+                    # Get the actual vision_tower object (might be wrapped)
+                    actual_tower = vision_tower.vision_tower if hasattr(vision_tower, 'vision_tower') else vision_tower
+                    if hasattr(actual_tower, 'to'):
+                        actual_tower_dtype = next(actual_tower.parameters()).dtype if hasattr(actual_tower, 'parameters') else None
+                        if actual_tower_dtype is not None and actual_tower_dtype != target_dtype:
+                            actual_tower = actual_tower.to(dtype=target_dtype)
+                            if hasattr(vision_tower, 'vision_tower'):
+                                vision_tower.vision_tower = actual_tower
+            except Exception:
+                pass  # If vision tower conversion fails, continue (images dtype should be enough)
             
             prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids = input_ids_for_seg if input_ids_for_seg is not None else input_ids,

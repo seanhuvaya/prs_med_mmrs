@@ -356,6 +356,13 @@ def infer_single(
     image_tensor_for_sam = image_tensor_for_sam.to(device)
     image_tensor = image_tensor.to(device)
     
+    # CRITICAL: Ensure image_tensor is in float16 to match model dtype
+    # The vision tower converts outputs to match input dtype, so if images are float32,
+    # vision tower outputs will be float32, causing mismatch with mm_projector (float16)
+    # Convert to float16 early to ensure consistency
+    if image_tensor.dtype != torch.float16:
+        image_tensor = image_tensor.to(dtype=torch.float16)
+    
     # Process prompts
     input_ids = process_prompt(prompt, tokenizer).to(device)
     input_ids_for_seg = process_prompt_seg(prompt, tokenizer).to(device)
@@ -408,10 +415,26 @@ def infer_single(
             if model_dtype == torch.bfloat16:
                 model_for_embedding = model_for_embedding.to(dtype=torch.float16)
             
-            # Ensure image tensor matches model dtype
+            # CRITICAL: Ensure image tensor is in float16 to match model dtype
+            # The vision tower converts outputs to match input dtype, so images must be float16
             image_tensor_debug = image_tensor
-            if image_tensor_debug.dtype != next(model_for_embedding.parameters()).dtype:
-                image_tensor_debug = image_tensor_debug.to(dtype=next(model_for_embedding.parameters()).dtype)
+            target_dtype = next(model_for_embedding.parameters()).dtype
+            if image_tensor_debug.dtype != target_dtype:
+                image_tensor_debug = image_tensor_debug.to(dtype=target_dtype)
+            
+            # Also ensure vision tower is in float16
+            try:
+                vision_tower = model_for_embedding.get_vision_tower() if hasattr(model_for_embedding, 'get_vision_tower') else None
+                if vision_tower is not None:
+                    actual_tower = vision_tower.vision_tower if hasattr(vision_tower, 'vision_tower') else vision_tower
+                    if hasattr(actual_tower, 'to') and hasattr(actual_tower, 'parameters'):
+                        tower_dtype = next(actual_tower.parameters()).dtype
+                        if tower_dtype != target_dtype:
+                            actual_tower = actual_tower.to(dtype=target_dtype)
+                            if hasattr(vision_tower, 'vision_tower'):
+                                vision_tower.vision_tower = actual_tower
+            except Exception:
+                pass
             
             prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids=input_ids_for_seg if input_ids_for_seg is not None else input_ids,
