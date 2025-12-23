@@ -159,13 +159,25 @@ class LLMSeg(nn.Module):
         self.mask_decoder.eval()
         
         # Ensure model is in float16 for inference (consistent with autocast)
-        # Check current dtype and convert if needed
+        # Check current dtype and convert if needed - this converts ALL submodules including mm_projector
         model_dtype = next(self.model.parameters()).dtype
-        if model_dtype == torch.bfloat16:
-            # Convert to float16 for inference to match autocast
+        if model_dtype == torch.bfloat16 or model_dtype == torch.float32:
+            # Convert entire model (including all submodules) to float16 for inference
             self.model = self.model.to(dtype=torch.float16)
         
+        # Also ensure base_model is in float16 if it exists and is different
+        if hasattr(self, 'base_model') and self.base_model is not None:
+            base_dtype = next(self.base_model.parameters()).dtype
+            if base_dtype == torch.bfloat16 or base_dtype == torch.float32:
+                self.base_model = self.base_model.to(dtype=torch.float16)
+        
         with torch.no_grad():
+            # Ensure image_tensor_for_vlm is in float16 to match model
+            # Get dtype from model (should be float16 after conversion above)
+            target_dtype = next(self.model.parameters()).dtype
+            if image_tensor_for_vlm.dtype != target_dtype:
+                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=target_dtype)
+            
             output_ids = self.model.generate(
                 inputs = input_ids,
                 images = image_tensor_for_vlm,
@@ -185,11 +197,8 @@ class LLMSeg(nn.Module):
             else:
                 # Fallback to base_model if merged model doesn't have the method
                 model_for_embedding = self.base_model
-                # Ensure base_model is also in float16
-                if next(model_for_embedding.parameters()).dtype == torch.bfloat16:
-                    model_for_embedding = model_for_embedding.to(dtype=torch.float16)
             
-            # Ensure image_tensor_for_vlm matches model dtype
+            # Ensure image_tensor_for_vlm matches model dtype (double-check)
             if image_tensor_for_vlm.dtype != next(model_for_embedding.parameters()).dtype:
                 image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=next(model_for_embedding.parameters()).dtype)
             

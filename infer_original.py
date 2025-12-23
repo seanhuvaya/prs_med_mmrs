@@ -396,9 +396,26 @@ def infer_single(
         with torch.no_grad():
             # Re-run mask decoder with debugging
             image_embedding = model.image_encoder(image_tensor_for_sam.float())
-            prompt_embedding = model.base_model.extract_last_hidden_state(
+            
+            # Use the same model selection logic as in generate() method
+            if hasattr(model.model, 'extract_last_hidden_state'):
+                model_for_embedding = model.model
+            else:
+                model_for_embedding = model.base_model
+            
+            # Ensure model is in correct dtype
+            model_dtype = next(model_for_embedding.parameters()).dtype
+            if model_dtype == torch.bfloat16:
+                model_for_embedding = model_for_embedding.to(dtype=torch.float16)
+            
+            # Ensure image tensor matches model dtype
+            image_tensor_debug = image_tensor
+            if image_tensor_debug.dtype != next(model_for_embedding.parameters()).dtype:
+                image_tensor_debug = image_tensor_debug.to(dtype=next(model_for_embedding.parameters()).dtype)
+            
+            prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids=input_ids_for_seg if input_ids_for_seg is not None else input_ids,
-                images=image_tensor,
+                images=image_tensor_debug,
                 do_sample=False,
                 temperature=0,
                 max_new_tokens=max_new_tokens,
