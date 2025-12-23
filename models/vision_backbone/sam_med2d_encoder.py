@@ -197,12 +197,6 @@ class SAMMed2DVisionBackbone(nn.Module):
         except Exception as e:
             print(f"[WARNING] Could not check checkpoint format: {e}, using checkpoint as-is")
         
-        # Prepare args object as SAM-Med2D expects (from https://github.com/OpenGVLab/SAM-Med2D)
-        args = Namespace()
-        args.image_size = sam_med2d_image_size
-        args.encoder_adapter = True  # SAM-Med2D checkpoints use adapter layers
-        args.sam_checkpoint = checkpoint_to_use
-        
         sam_model = None
         encoder = None
         last_error = None
@@ -217,16 +211,19 @@ class SAMMed2DVisionBackbone(nn.Module):
             model_types_to_try = [model_type]
             print(f"[INFO] Will try loading with detected model type: {model_type}")
         
-        # Try loading SAM-Med2D using their official API
+        # Standard SAM registry expects checkpoint as a keyword argument (string path)
+        # SAM-Med2D checkpoints are trained with image_size=256, but standard SAM builds with 1024
+        # We'll load the checkpoint and handle size mismatches if needed
         try:
             for try_model_type in model_types_to_try:
                 try:
-                    print(f"[INFO] Loading SAM-Med2D model with type '{try_model_type}' using official API...")
-                    print(f"[INFO] Using args: image_size={args.image_size}, encoder_adapter={args.encoder_adapter}, checkpoint={args.sam_checkpoint}")
+                    print(f"[INFO] Loading SAM-Med2D model with type '{try_model_type}'...")
+                    print(f"[INFO] Using checkpoint: {checkpoint_to_use}")
                     
-                    # Load using SAM-Med2D's official API: sam_model_registry[model_type](args)
-                    # This is how SAM-Med2D loads models according to their repository
-                    sam_model = sam_model_registry[try_model_type](args)
+                    # Standard SAM API: sam_model_registry[model_type](checkpoint=path)
+                    # This builds a model with image_size=1024, but SAM-Med2D checkpoint has 256
+                    # We'll load with strict=False to handle size mismatches
+                    sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_to_use)
                     encoder = sam_model.image_encoder
                     
                     print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
@@ -237,30 +234,74 @@ class SAMMed2DVisionBackbone(nn.Module):
                         f"Invalid model type '{try_model_type}'. "
                         f"Supported types: {list(sam_model_registry.keys())}"
                     )
-                except (RuntimeError, ValueError, TypeError) as e:
-                    # Check if the error is because sam_model_registry doesn't accept args
-                    # In that case, fall back to checkpoint-based loading
+                except (RuntimeError, ValueError) as e:
+                    # Handle size mismatch errors (SAM-Med2D uses 256, standard SAM uses 1024)
                     error_msg = str(e).lower()
                     last_error = e
                     
-                    if "unexpected keyword argument" in error_msg or "takes" in error_msg and "positional" in error_msg:
-                        print(f"[WARNING] SAM-Med2D registry doesn't accept args, trying checkpoint-based loading...")
-                        # Fall back to checkpoint-based loading
-                        try:
-                            sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
-                            encoder = sam_model.image_encoder
-                            print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} using checkpoint-based loading")
-                            model_type = try_model_type
-                            break
-                        except Exception as e2:
-                            last_error = e2
-                            if try_model_type == model_types_to_try[-1]:
-                                raise RuntimeError(
-                                    f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}'.\n"
-                                    f"Tried both args-based and checkpoint-based loading.\n"
-                                    f"Last error: {e2}"
-                                )
-                            continue
+                    if "size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg:
+                        print(f"[INFO] Detected size mismatch - SAM-Med2D checkpoint uses image_size=256, attempting to load with size adaptation...")
+                        
+                        # Build model without checkpoint first
+                        sam_model = sam_model_registry[try_model_type](checkpoint=None)
+                        
+                        # Load checkpoint and resize position embeddings if needed
+                        checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
+                        
+                        # Check if we need to resize position embeddings
+                        if 'image_encoder.pos_embed' in checkpoint_state:
+                            pos_embed_shape = checkpoint_state['image_encoder.pos_embed'].shape
+                            if len(pos_embed_shape) == 4:
+                                patch_h, patch_w = pos_embed_shape[1], pos_embed_shape[2]
+                                checkpoint_img_size = patch_h * 16  # patch_size = 16
+                                
+                                if checkpoint_img_size == 256:
+                                    # SAM-Med2D checkpoint - resize to match model's 1024
+                                    print(f"[INFO] Resizing position embeddings from 256x256 to 1024x1024...")
+                                    old_h, old_w = patch_h, patch_w
+                                    new_h, new_w = 64, 64  # 1024 / 16 = 64
+                                    
+                                    # Resize pos_embed
+                                    old_pos_embed = checkpoint_state['image_encoder.pos_embed']
+                                    old_pos_embed_2d = old_pos_embed.squeeze(0).permute(2, 0, 1)  # [C, H, W]
+                                    new_pos_embed_2d = torch.nn.functional.interpolate(
+                                        old_pos_embed_2d.unsqueeze(0),
+                                        size=(new_h, new_w),
+                                        mode='bilinear',
+                                        align_corners=False
+                                    ).squeeze(0)  # [C, H_new, W_new]
+                                    new_pos_embed = new_pos_embed_2d.permute(1, 2, 0).unsqueeze(0)  # [1, H_new, W_new, C]
+                                    checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
+                                    
+                                    # Resize relative position embeddings
+                                    for key in list(checkpoint_state.keys()):
+                                        if 'rel_pos_h' in key or 'rel_pos_w' in key:
+                                            old_rel_pos = checkpoint_state[key]
+                                            if len(old_rel_pos.shape) == 2:
+                                                old_size = (old_rel_pos.shape[0] + 1) // 2
+                                                new_size = 64
+                                                new_rel_pos_size = 2 * new_size - 1
+                                                
+                                                old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
+                                                new_rel_pos_expanded = torch.nn.functional.interpolate(
+                                                    old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
+                                                    size=(1, new_rel_pos_size),
+                                                    mode='bilinear',
+                                                    align_corners=False
+                                                ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
+                                                checkpoint_state[key] = new_rel_pos_expanded
+                        
+                        # Load with strict=False to handle missing keys (like Adapter layers)
+                        missing_keys, unexpected_keys = sam_model.load_state_dict(checkpoint_state, strict=False)
+                        if missing_keys:
+                            print(f"[WARNING] Missing keys when loading checkpoint: {len(missing_keys)} keys (likely Adapter layers)")
+                        if unexpected_keys:
+                            print(f"[WARNING] Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+                        
+                        encoder = sam_model.image_encoder
+                        print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} with size adaptation")
+                        model_type = try_model_type
+                        break
                     
                     # If we detected a specific model type, don't try others
                     if len(model_types_to_try) == 1:
@@ -274,10 +315,10 @@ class SAMMed2DVisionBackbone(nn.Module):
                             f"Please verify the checkpoint file and model type."
                         )
                     
-                    # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
-                    if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
+                    # Check if it's a missing key error - only try next if we're trying multiple types
+                    if "missing key" in error_msg:
                         if try_model_type != model_types_to_try[-1]:
-                            print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
+                            print(f"[WARNING] Missing keys with '{try_model_type}', trying next model type...")
                             continue
                     
                     # If it's the last attempt, raise the error
@@ -289,7 +330,7 @@ class SAMMed2DVisionBackbone(nn.Module):
                             f"Please check that the checkpoint matches one of the model types: {list(sam_model_registry.keys())}"
                         )
                     else:
-                        # Re-raise if it's not a size mismatch error
+                        # Re-raise if it's not a handled error
                         raise
         finally:
             # Clean up temporary file if we created one
