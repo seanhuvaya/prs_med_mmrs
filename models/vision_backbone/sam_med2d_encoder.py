@@ -240,25 +240,47 @@ class SAMMed2DVisionBackbone(nn.Module):
                     last_error = e
                     
                     if "size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg:
-                        print(f"[INFO] Detected size mismatch, attempting to load with size adaptation...")
+                        print(f"[DEBUG] ========== SIZE MISMATCH DETECTED ==========")
+                        print(f"[DEBUG] Original error: {e}")
+                        print(f"[DEBUG] Attempting to load with size adaptation...")
                         
                         # Build model without checkpoint first to see what size it expects
+                        print(f"[DEBUG] Building model without checkpoint...")
                         sam_model = sam_model_registry[try_model_type](checkpoint=None)
                         
-                        # Check what size the model expects
+                        # Check what size the model expects - check multiple sources
                         model_pos_embed = sam_model.image_encoder.pos_embed
+                        model_img_size = None
+                        model_patch_size = None
                         if len(model_pos_embed.shape) == 4:
                             model_patch_h, model_patch_w = model_pos_embed.shape[1], model_pos_embed.shape[2]
+                            model_patch_size = model_patch_h
                             model_img_size = model_patch_h * 16
-                            print(f"[INFO] Model expects image_size={model_img_size} (patches: {model_patch_h}x{model_patch_w})")
+                            print(f"[DEBUG] Model pos_embed shape: {model_pos_embed.shape}")
+                            print(f"[DEBUG] Model expects image_size={model_img_size} (patches: {model_patch_h}x{model_patch_w})")
+                        
+                        # Also check rel_pos in model to verify
+                        for name, param in sam_model.image_encoder.named_parameters():
+                            if 'rel_pos_h' in name or 'rel_pos_w' in name:
+                                if len(param.shape) == 2:
+                                    model_rel_pos_size = param.shape[0]
+                                    model_patch_from_rel = (model_rel_pos_size + 1) // 2
+                                    model_img_from_rel = model_patch_from_rel * 16
+                                    print(f"[DEBUG] Model {name} shape: {param.shape}, implies patch_size={model_patch_from_rel}, image_size={model_img_from_rel}")
+                                    if model_img_size is None:
+                                        model_img_size = model_img_from_rel
+                                        model_patch_size = model_patch_from_rel
+                                    break
                         
                         # Load checkpoint and detect its size
+                        print(f"[DEBUG] Loading checkpoint from: {checkpoint_to_use}")
                         checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
+                        print(f"[DEBUG] Checkpoint has {len(checkpoint_state)} keys")
                         
                         # Filter out Adapter keys (SAM-Med2D specific, not in standard SAM)
                         adapter_keys = [k for k in checkpoint_state.keys() if 'Adapter' in k]
                         if adapter_keys:
-                            print(f"[INFO] Filtering out {len(adapter_keys)} Adapter keys (SAM-Med2D specific, not in standard SAM)")
+                            print(f"[DEBUG] Filtering out {len(adapter_keys)} Adapter keys (SAM-Med2D specific)")
                             for key in adapter_keys:
                                 del checkpoint_state[key]
                         
@@ -267,87 +289,115 @@ class SAMMed2DVisionBackbone(nn.Module):
                         checkpoint_patch_size = None
                         if 'image_encoder.pos_embed' in checkpoint_state:
                             pos_embed_shape = checkpoint_state['image_encoder.pos_embed'].shape
+                            print(f"[DEBUG] Checkpoint pos_embed shape: {pos_embed_shape}")
                             if len(pos_embed_shape) == 4:
                                 patch_h, patch_w = pos_embed_shape[1], pos_embed_shape[2]
                                 checkpoint_patch_size = patch_h
                                 checkpoint_img_size = patch_h * 16
-                                print(f"[INFO] Checkpoint has image_size={checkpoint_img_size} (detected from pos_embed: {patch_h}x{patch_w} patches)")
+                                print(f"[DEBUG] Checkpoint has image_size={checkpoint_img_size} (detected from pos_embed: {patch_h}x{patch_w} patches)")
                         
-                        # Verify with rel_pos if available
-                        if checkpoint_patch_size is None:
-                            for key in checkpoint_state.keys():
-                                if 'rel_pos_h' in key or 'rel_pos_w' in key:
-                                    rel_pos_shape = checkpoint_state[key].shape
-                                    if len(rel_pos_shape) == 2:
-                                        # rel_pos shape: [2*H-1, head_dim]
-                                        patch_size_from_rel = (rel_pos_shape[0] + 1) // 2
+                        # Check rel_pos sizes in checkpoint
+                        rel_pos_sizes = {}
+                        for key in checkpoint_state.keys():
+                            if 'rel_pos_h' in key or 'rel_pos_w' in key:
+                                rel_pos_shape = checkpoint_state[key].shape
+                                if len(rel_pos_shape) == 2:
+                                    rel_pos_sizes[key] = rel_pos_shape[0]
+                                    patch_size_from_rel = (rel_pos_shape[0] + 1) // 2
+                                    img_size_from_rel = patch_size_from_rel * 16
+                                    print(f"[DEBUG] Checkpoint {key} shape: {rel_pos_shape}, implies patch_size={patch_size_from_rel}, image_size={img_size_from_rel}")
+                                    if checkpoint_img_size is None:
                                         checkpoint_patch_size = patch_size_from_rel
-                                        checkpoint_img_size = patch_size_from_rel * 16
-                                        print(f"[INFO] Checkpoint has image_size={checkpoint_img_size} (detected from {key} with shape {rel_pos_shape})")
-                                        break
+                                        checkpoint_img_size = img_size_from_rel
+                        
+                        # Check for size inconsistencies
+                        if rel_pos_sizes:
+                            unique_sizes = set(rel_pos_sizes.values())
+                            if len(unique_sizes) > 1:
+                                print(f"[WARNING] Checkpoint has inconsistent rel_pos sizes: {unique_sizes}")
+                                print(f"[DEBUG] Will resize all rel_pos to match model size")
                         
                         # Resize if sizes don't match
-                        if checkpoint_img_size is not None and checkpoint_img_size != model_img_size:
-                            print(f"[INFO] Resizing embeddings from {checkpoint_img_size}x{checkpoint_img_size} to {model_img_size}x{model_img_size}...")
-                            
-                            model_patch_size = model_img_size // 16
-                            
-                            # Resize pos_embed
-                            if 'image_encoder.pos_embed' in checkpoint_state:
-                                old_pos_embed = checkpoint_state['image_encoder.pos_embed']
-                                old_h, old_w = old_pos_embed.shape[1], old_pos_embed.shape[2]
-                                old_pos_embed_2d = old_pos_embed.squeeze(0).permute(2, 0, 1)  # [C, H, W]
-                                new_pos_embed_2d = torch.nn.functional.interpolate(
-                                    old_pos_embed_2d.unsqueeze(0),
-                                    size=(model_patch_size, model_patch_size),
-                                    mode='bilinear',
-                                    align_corners=False
-                                ).squeeze(0)  # [C, H_new, W_new]
-                                new_pos_embed = new_pos_embed_2d.permute(1, 2, 0).unsqueeze(0)  # [1, H_new, W_new, C]
-                                checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
-                                print(f"[INFO] Resized pos_embed from {old_h}x{old_w} to {model_patch_size}x{model_patch_size}")
-                            
-                            # Resize ALL relative position embeddings consistently
-                            new_rel_pos_size = 2 * model_patch_size - 1
-                            resized_count = 0
-                            for key in list(checkpoint_state.keys()):
-                                if 'rel_pos_h' in key or 'rel_pos_w' in key:
-                                    old_rel_pos = checkpoint_state[key]
-                                    if len(old_rel_pos.shape) == 2:
-                                        old_size = old_rel_pos.shape[0]
-                                        # Always resize to match model, regardless of current size
-                                        old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
-                                        new_rel_pos_expanded = torch.nn.functional.interpolate(
-                                            old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
-                                            size=(1, new_rel_pos_size),
-                                            mode='bilinear',
-                                            align_corners=False
-                                        ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
-                                        checkpoint_state[key] = new_rel_pos_expanded
-                                        resized_count += 1
-                            print(f"[INFO] Resized {resized_count} relative position embedding(s) to size [{new_rel_pos_size}]")
-                        elif checkpoint_img_size == model_img_size:
-                            print(f"[INFO] Checkpoint and model have matching image_size={checkpoint_img_size}, no resizing needed")
+                        if checkpoint_img_size is not None and model_img_size is not None:
+                            if checkpoint_img_size != model_img_size:
+                                print(f"[DEBUG] ========== RESIZING NEEDED ==========")
+                                print(f"[DEBUG] Checkpoint: {checkpoint_img_size}x{checkpoint_img_size} ({checkpoint_patch_size}x{checkpoint_patch_size} patches)")
+                                print(f"[DEBUG] Model: {model_img_size}x{model_img_size} ({model_patch_size}x{model_patch_size} patches)")
+                                
+                                # Resize pos_embed
+                                if 'image_encoder.pos_embed' in checkpoint_state:
+                                    old_pos_embed = checkpoint_state['image_encoder.pos_embed']
+                                    old_h, old_w = old_pos_embed.shape[1], old_pos_embed.shape[2]
+                                    print(f"[DEBUG] Resizing pos_embed from {old_h}x{old_w} to {model_patch_size}x{model_patch_size}...")
+                                    old_pos_embed_2d = old_pos_embed.squeeze(0).permute(2, 0, 1)  # [C, H, W]
+                                    new_pos_embed_2d = torch.nn.functional.interpolate(
+                                        old_pos_embed_2d.unsqueeze(0),
+                                        size=(model_patch_size, model_patch_size),
+                                        mode='bilinear',
+                                        align_corners=False
+                                    ).squeeze(0)  # [C, H_new, W_new]
+                                    new_pos_embed = new_pos_embed_2d.permute(1, 2, 0).unsqueeze(0)  # [1, H_new, W_new, C]
+                                    checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
+                                    print(f"[DEBUG] pos_embed resized: {checkpoint_state['image_encoder.pos_embed'].shape}")
+                                
+                                # Resize ALL relative position embeddings consistently
+                                new_rel_pos_size = 2 * model_patch_size - 1
+                                print(f"[DEBUG] Target rel_pos size: {new_rel_pos_size} (for {model_patch_size}x{model_patch_size} patches)")
+                                resized_count = 0
+                                for key in list(checkpoint_state.keys()):
+                                    if 'rel_pos_h' in key or 'rel_pos_w' in key:
+                                        old_rel_pos = checkpoint_state[key]
+                                        if len(old_rel_pos.shape) == 2:
+                                            old_size = old_rel_pos.shape[0]
+                                            print(f"[DEBUG] Resizing {key} from [{old_size}] to [{new_rel_pos_size}]...")
+                                            old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
+                                            new_rel_pos_expanded = torch.nn.functional.interpolate(
+                                                old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
+                                                size=(1, new_rel_pos_size),
+                                                mode='bilinear',
+                                                align_corners=False
+                                            ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
+                                            checkpoint_state[key] = new_rel_pos_expanded
+                                            print(f"[DEBUG] {key} resized: {checkpoint_state[key].shape}")
+                                            resized_count += 1
+                                print(f"[DEBUG] Resized {resized_count} relative position embedding(s)")
+                            else:
+                                print(f"[DEBUG] Checkpoint and model have matching image_size={checkpoint_img_size}, no resizing needed")
                         else:
-                            print(f"[WARNING] Could not detect checkpoint image size, attempting to load as-is")
+                            print(f"[WARNING] Could not detect sizes - checkpoint_img_size={checkpoint_img_size}, model_img_size={model_img_size}")
+                            print(f"[DEBUG] Attempting to load as-is...")
                         
                         # Load with strict=False to handle any remaining missing/unexpected keys
-                        missing_keys, unexpected_keys = sam_model.load_state_dict(checkpoint_state, strict=False)
-                        if missing_keys:
-                            print(f"[WARNING] Missing keys when loading checkpoint: {len(missing_keys)} keys (likely Adapter layers)")
-                            # Print first few missing keys for debugging
-                            for key in list(missing_keys)[:5]:
-                                print(f"  - {key}")
-                        if unexpected_keys:
-                            print(f"[WARNING] Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
-                            # Print first few unexpected keys for debugging
-                            for key in list(unexpected_keys)[:5]:
-                                print(f"  - {key}")
-                        
-                        encoder = sam_model.image_encoder
-                        print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} with size adaptation")
-                        model_type = try_model_type
-                        break
+                        print(f"[DEBUG] Attempting to load state_dict...")
+                        try:
+                            missing_keys, unexpected_keys = sam_model.load_state_dict(checkpoint_state, strict=False)
+                            if missing_keys:
+                                print(f"[DEBUG] Missing keys: {len(missing_keys)}")
+                                for key in list(missing_keys)[:10]:
+                                    print(f"[DEBUG]   - {key}")
+                            if unexpected_keys:
+                                print(f"[DEBUG] Unexpected keys: {len(unexpected_keys)}")
+                                for key in list(unexpected_keys)[:10]:
+                                    print(f"[DEBUG]   - {key}")
+                            
+                            encoder = sam_model.image_encoder
+                            print(f"[DEBUG] ========== SUCCESSFULLY LOADED ==========")
+                            print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} with size adaptation")
+                            model_type = try_model_type
+                            break
+                        except RuntimeError as load_error:
+                            print(f"[DEBUG] ========== LOAD FAILED ==========")
+                            print(f"[DEBUG] Load error: {load_error}")
+                            # Check if it's still a size mismatch
+                            load_error_msg = str(load_error).lower()
+                            if "size mismatch" in load_error_msg:
+                                # Extract the mismatched keys
+                                error_lines = str(load_error).split('\n')
+                                size_mismatches = [line for line in error_lines if 'size mismatch' in line.lower()]
+                                print(f"[DEBUG] Remaining size mismatches:")
+                                for mismatch in size_mismatches[:10]:
+                                    print(f"[DEBUG]   {mismatch}")
+                            raise
                     
                     # If we detected a specific model type, don't try others
                     if len(model_types_to_try) == 1:
