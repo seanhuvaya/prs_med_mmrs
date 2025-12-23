@@ -23,6 +23,7 @@ Arguments:
   DATA_DOWNLOAD_DIR    Directory where the dataset will be downloaded
   PROJECT_REPO_DIR     Directory where the project repository will be cloned
   WEIGHTS_DIR          Directory where the weights will be downloaded
+  HF_TOKEN             Hugging Face token
 Options:
   -h, --help           Show this help message and exit
 
@@ -49,7 +50,7 @@ DATA_DOWNLOAD_DIR="$1"
 PROJECT_REPO_DIR="$2"
 WEIGHTS_DIR="$3"
 SAM_MED2D_WEIGHT="sam2.1_hiera_large.pt"
-
+HF_TOKEN="$4"
 # -----------------------------
 # Install system dependencies
 # -----------------------------
@@ -113,3 +114,18 @@ cd "$PROJECT_REPO_DIR"
 uv sync
 
 echo -e "${GREEN}Setup completed successfully!${NC}"
+
+# -----------------------------
+# Install Hugging Face CLI
+# -----------------------------
+echo -e "${BLUE}Installing Hugging Face CLI...${NC}"
+curl -LsSf https://hf.co/cli/install.sh | bash
+source "$HOME/.local/bin/env"
+
+# -----------------------------
+# Login to Hugging Face
+# -----------------------------
+echo -e "${BLUE}Logging in to Hugging Face...${NC}"
+hf auth login --token $HF_TOKEN --add-to-git-credential
+
+

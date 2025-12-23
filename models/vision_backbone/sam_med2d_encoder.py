@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 import functools
-from argparse import Namespace
 
 # Patch torch.load before importing SAM-Med2D to ensure compatibility with PyTorch 2.6+
 # This allows loading checkpoints that contain optimizer states
@@ -127,13 +126,7 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
 
-        # SAM-Med2D uses an args Namespace object for initialization
-        # Based on official SAM-Med2D implementation
-        args = Namespace()
-        args.image_size = image_size
-        args.encoder_adapter = True  # SAM-Med2D uses encoder adapter
-        args.sam_checkpoint = checkpoint_path
-
+        # SAM-Med2D registry expects checkpoint as a keyword argument
         # torch.load is already patched at module level for PyTorch 2.6+ compatibility
         # This allows loading checkpoints that contain optimizer states
         sam_model = None
@@ -155,7 +148,7 @@ class SAMMed2DVisionBackbone(nn.Module):
         for try_model_type in model_types_to_try:
             try:
                 print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
-                sam_model = sam_model_registry[try_model_type](args)
+                sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
                 encoder = sam_model.image_encoder
                 print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
                 model_type = try_model_type  # Update to the successful type

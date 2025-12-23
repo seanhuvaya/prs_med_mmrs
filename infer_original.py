@@ -131,14 +131,34 @@ def parse_args():
 
 def transform_for_sam(image_path):
     """Transform image for SAM encoder"""
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    
     image_sam_transform = transforms.Compose([
         transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    image = load_image(image_path)
-    image_tensor = image_sam_transform(image)
-    return image_tensor.to(torch.float32).unsqueeze(0)
+    
+    try:
+        image = load_image(image_path)
+        if image is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+        
+        # Validate image dimensions
+        if image.size[0] == 0 or image.size[1] == 0:
+            raise ValueError(f"Image has invalid dimensions: {image.size} for {image_path}")
+        
+        # Ensure image is in RGB mode
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        image_tensor = image_sam_transform(image)
+        return image_tensor.to(torch.float32).unsqueeze(0)
+    except (IOError, OSError) as e:
+        raise RuntimeError(f"Error loading image file {image_path}: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Error processing image {image_path} (size: {image.size if 'image' in locals() else 'unknown'}, mode: {image.mode if 'image' in locals() else 'unknown'}): {e}") from e
 
 
 def load_image_for_vlm(image_path, image_processor, config):
@@ -359,6 +379,10 @@ def main():
         
         image_path = image_path.replace("\\", "/")
         
+        # Debug: print image path for first few samples
+        if idx < 3:
+            print(f"Processing image {idx}: {image_path}")
+        
         # Get prompt
         prompt = row.get('question', '')
         if not prompt:
@@ -381,6 +405,11 @@ def main():
         mask_path = mask_path.replace("\\", "/") if mask_path else None
         
         try:
+            # Validate image path exists
+            if not os.path.exists(image_path):
+                print(f"Skipping row {idx}: Image file not found: {image_path}")
+                continue
+            
             # Run inference
             mask_prob, text_output = infer_single(
                 model=model,
