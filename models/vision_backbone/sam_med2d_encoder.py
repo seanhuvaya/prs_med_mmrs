@@ -85,6 +85,22 @@ class SAMMed2DVisionBackbone(nn.Module):
                 print(f"[INFO] Inspecting checkpoint to determine model type...")
                 checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
                 
+                # Handle training checkpoint format (has "model" key)
+                if isinstance(checkpoint, dict) and "model" in checkpoint:
+                    checkpoint = checkpoint["model"]
+                    # Check if nested further
+                    if isinstance(checkpoint, dict) and not any(
+                        key.startswith("image_encoder") or 
+                        key.startswith("prompt_encoder") or 
+                        key.startswith("mask_decoder")
+                        for key in checkpoint.keys()
+                    ):
+                        # Try common nested keys
+                        for key in ["state_dict", "model_state_dict", "model", "sam_model"]:
+                            if key in checkpoint and isinstance(checkpoint[key], dict):
+                                checkpoint = checkpoint[key]
+                                break
+                
                 # Check for image_encoder.trunk dimensions (SAM-Med2D structure)
                 if 'image_encoder.trunk.patch_embed.proj.weight' in checkpoint:
                     embed_dim = checkpoint['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
@@ -100,8 +116,23 @@ class SAMMed2DVisionBackbone(nn.Module):
                     else:
                         print(f"[WARNING] Unknown embed_dim {embed_dim}, will try to infer from filename")
                         model_type = None  # Will try filename next
+                # Also check for standard SAM structure (without trunk)
+                elif 'image_encoder.patch_embed.proj.weight' in checkpoint:
+                    embed_dim = checkpoint['image_encoder.patch_embed.proj.weight'].shape[0]
+                    if embed_dim == 768:
+                        model_type = "vit_b"
+                        print(f"[INFO] Detected vit_b from checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 1024:
+                        model_type = "vit_l"
+                        print(f"[INFO] Detected vit_l from checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 1280:
+                        model_type = "vit_h"
+                        print(f"[INFO] Detected vit_h from checkpoint (embed_dim={embed_dim})")
+                    else:
+                        print(f"[WARNING] Unknown embed_dim {embed_dim}, will try to infer from filename")
+                        model_type = None  # Will try filename next
                 else:
-                    print(f"[WARNING] Could not find image_encoder.trunk in checkpoint, will try filename")
+                    print(f"[WARNING] Could not find image_encoder in checkpoint, will try filename")
                     model_type = None  # Will try filename next
             except Exception as e:
                 print(f"[WARNING] Could not inspect checkpoint: {e}, will try filename")
@@ -126,6 +157,83 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
 
+        # Check if checkpoint is a training checkpoint (has "model" key) or direct state_dict
+        # Load checkpoint to inspect its structure
+        import tempfile
+        import os
+        
+        checkpoint_to_use = checkpoint_path
+        temp_checkpoint_path = None
+        
+        try:
+            checkpoint_data = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            
+            # Check if this is a training checkpoint with "model" key
+            if isinstance(checkpoint_data, dict) and "model" in checkpoint_data:
+                print(f"[INFO] Detected training checkpoint format (has 'model' key), extracting model state_dict...")
+                model_state_dict = checkpoint_data["model"]
+                
+                # Check if model_state_dict contains SAM model keys directly
+                # SAM model keys typically start with: image_encoder, prompt_encoder, mask_decoder
+                has_sam_keys = any(
+                    key.startswith("image_encoder") or 
+                    key.startswith("prompt_encoder") or 
+                    key.startswith("mask_decoder")
+                    for key in model_state_dict.keys()
+                )
+                
+                if has_sam_keys:
+                    # Direct SAM model state_dict - use it directly
+                    actual_state_dict = model_state_dict
+                else:
+                    # Check if it's a nested structure (e.g., model wrapped in another layer)
+                    # Try common nested structures
+                    if isinstance(model_state_dict, dict):
+                        # Check for common wrapper keys
+                        for key in ["state_dict", "model_state_dict", "model", "sam_model"]:
+                            if key in model_state_dict:
+                                nested = model_state_dict[key]
+                                if isinstance(nested, dict) and any(
+                                    k.startswith("image_encoder") or 
+                                    k.startswith("prompt_encoder") or 
+                                    k.startswith("mask_decoder")
+                                    for k in nested.keys()
+                                ):
+                                    actual_state_dict = nested
+                                    print(f"[INFO] Found SAM model state_dict nested under '{key}' key")
+                                    break
+                        else:
+                            # If no nested structure found, use the model_state_dict as-is
+                            # It might be the actual state_dict but with different key structure
+                            actual_state_dict = model_state_dict
+                            print(f"[WARNING] Could not find standard SAM keys, using model state_dict as-is")
+                    else:
+                        actual_state_dict = model_state_dict
+                
+                # Save extracted state_dict to temporary file for SAM to load
+                temp_checkpoint = tempfile.NamedTemporaryFile(delete=False, suffix='.pth')
+                temp_checkpoint_path = temp_checkpoint.name
+                temp_checkpoint.close()
+                torch.save(actual_state_dict, temp_checkpoint_path)
+                print(f"[INFO] Saved extracted model state_dict to temporary file: {temp_checkpoint_path}")
+                checkpoint_to_use = temp_checkpoint_path
+            elif isinstance(checkpoint_data, dict) and any(
+                key.startswith("image_encoder") or 
+                key.startswith("prompt_encoder") or 
+                key.startswith("mask_decoder")
+                for key in checkpoint_data.keys()
+            ):
+                # Direct SAM model state_dict - use as is
+                print(f"[INFO] Checkpoint appears to be a direct SAM model state_dict")
+                checkpoint_to_use = checkpoint_path
+            else:
+                # Unknown structure - try using as-is
+                print(f"[INFO] Checkpoint structure unclear, attempting to load as-is")
+                checkpoint_to_use = checkpoint_path
+        except Exception as e:
+            print(f"[WARNING] Could not inspect checkpoint structure: {e}, using checkpoint as-is")
+            checkpoint_to_use = checkpoint_path
+
         # SAM-Med2D registry expects checkpoint as a keyword argument
         # torch.load is already patched at module level for PyTorch 2.6+ compatibility
         # This allows loading checkpoints that contain optimizer states
@@ -145,40 +253,49 @@ class SAMMed2DVisionBackbone(nn.Module):
         elif model_type == "vit_h":
             model_types_to_try.extend(["vit_l", "vit_b"])
         
-        for try_model_type in model_types_to_try:
-            try:
-                print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
-                sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
-                encoder = sam_model.image_encoder
-                print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
-                model_type = try_model_type  # Update to the successful type
-                break
-            except KeyError:
-                raise ValueError(
-                    f"Invalid model type '{try_model_type}'. "
-                    f"Supported types: {list(sam_model_registry.keys())}"
-                )
-            except (RuntimeError, ValueError) as e:
-                # Size mismatch or other loading error - try next type
-                last_error = e
-                error_msg = str(e).lower()
-                # Check if it's a size mismatch or shape error
-                if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg):
-                    if try_model_type != model_types_to_try[-1]:
-                        print(f"[WARNING] Size/shape mismatch with '{try_model_type}', trying next model type...")
-                        continue
-                
-                # If it's the last attempt, raise the error
-                if try_model_type == model_types_to_try[-1]:
-                    raise RuntimeError(
-                        f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
-                        f"Tried: {model_types_to_try}\n"
-                        f"Last error: {e}\n"
-                        f"Please check that the checkpoint matches one of the model types: {list(sam_model_registry.keys())}"
+        try:
+            for try_model_type in model_types_to_try:
+                try:
+                    print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
+                    sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_to_use)
+                    encoder = sam_model.image_encoder
+                    print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
+                    model_type = try_model_type  # Update to the successful type
+                    break
+                except KeyError:
+                    raise ValueError(
+                        f"Invalid model type '{try_model_type}'. "
+                        f"Supported types: {list(sam_model_registry.keys())}"
                     )
-                else:
-                    # Re-raise if it's not a size mismatch error
-                    raise
+                except (RuntimeError, ValueError) as e:
+                    # Size mismatch or other loading error - try next type
+                    last_error = e
+                    error_msg = str(e).lower()
+                    # Check if it's a size mismatch or shape error
+                    if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
+                        if try_model_type != model_types_to_try[-1]:
+                            print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
+                            continue
+                    
+                    # If it's the last attempt, raise the error
+                    if try_model_type == model_types_to_try[-1]:
+                        raise RuntimeError(
+                            f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
+                            f"Tried: {model_types_to_try}\n"
+                            f"Last error: {e}\n"
+                            f"Please check that the checkpoint matches one of the model types: {list(sam_model_registry.keys())}"
+                        )
+                    else:
+                        # Re-raise if it's not a size mismatch error
+                        raise
+        finally:
+            # Clean up temporary file if we created one
+            if temp_checkpoint_path is not None and os.path.exists(temp_checkpoint_path):
+                try:
+                    os.unlink(temp_checkpoint_path)
+                    print(f"[INFO] Cleaned up temporary checkpoint file")
+                except:
+                    pass
         
         if encoder is None:
             raise RuntimeError(
