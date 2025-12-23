@@ -253,6 +253,23 @@ def load_model(args):
     )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
+    
+    # Verify checkpoint directory exists and has required files
+    if not os.path.exists(args.checkpoint):
+        raise FileNotFoundError(f"Checkpoint directory not found: {args.checkpoint}")
+    
+    mask_decoder_path = os.path.join(args.checkpoint, "mask_decoder.pth")
+    if not os.path.exists(mask_decoder_path):
+        print(f"⚠ WARNING: mask_decoder.pth not found in checkpoint directory!")
+        print(f"   Expected: {mask_decoder_path}")
+        print(f"   This may cause NaN outputs if mask decoder weights are not loaded.")
+        print(f"   Checkpoint directory contents:")
+        if os.path.isdir(args.checkpoint):
+            for f in os.listdir(args.checkpoint):
+                print(f"     - {f}")
+    else:
+        print(f"✓ Found mask_decoder.pth: {mask_decoder_path}")
+    
     tokenizer = model.load_model(args.checkpoint)
     model = model.to(args.device)
     model.eval()
@@ -373,13 +390,38 @@ def infer_single(
     
     # Check for NaN in output
     if torch.isnan(output_mask).any() or torch.isinf(output_mask).any():
+        # Detailed debugging: check intermediate values in mask decoder
+        print(f"\n[DEBUG NaN] Checking intermediate values for {image_path}:")
+        with torch.no_grad():
+            # Re-run mask decoder with debugging
+            image_embedding = model.image_encoder(image_tensor_for_sam.float())
+            prompt_embedding = model.base_model.extract_last_hidden_state(
+                input_ids=input_ids_for_seg if input_ids_for_seg is not None else input_ids,
+                images=image_tensor,
+                do_sample=False,
+                temperature=0,
+                max_new_tokens=max_new_tokens,
+                top_p=top_p
+            )["hidden_states"][-1]
+            
+            print(f"  image_embedding: shape={image_embedding.shape}, has_nan={torch.isnan(image_embedding).any()}, has_inf={torch.isinf(image_embedding).any()}")
+            print(f"  prompt_embedding: shape={prompt_embedding.shape}, has_nan={torch.isnan(prompt_embedding).any()}, has_inf={torch.isinf(prompt_embedding).any()}")
+            
+            # Check mask decoder weights
+            for name, param in list(model.mask_decoder.named_parameters())[:3]:  # Check first 3 params
+                has_nan = torch.isnan(param).any()
+                has_inf = torch.isinf(param).any()
+                if has_nan or has_inf:
+                    print(f"  mask_decoder.{name}: has_nan={has_nan}, has_inf={has_inf}, mean={param.mean().item():.6f}")
+        
         raise ValueError(
             f"NaN/Inf detected in output_mask for {image_path}.\n"
             "This indicates a model issue. Possible causes:\n"
             "  1. Checkpoint not loaded correctly (check checkpoint path)\n"
             "  2. Model weights are corrupted or uninitialized\n"
             "  3. Numerical instability in mask decoder\n"
-            "  4. Wrong model architecture for this checkpoint"
+            "  4. Wrong model architecture for this checkpoint\n"
+            "Check the debug output above to see where NaN first appears."
         )
     
     # Process outputs
@@ -505,18 +547,27 @@ def main():
                 continue
             
             # Run inference
-            mask_prob, text_output = infer_single(
-                model=model,
-                tokenizer=tokenizer,
-                image_processor=image_processor,
-                config=config,
-                image_path=image_path,
-                prompt=prompt,
-                device=device,
-                temperature=args.temperature,
-                max_new_tokens=args.max_new_tokens,
-                top_p=args.top_p
-            )
+            try:
+                mask_prob, text_output = infer_single(
+                    model=model,
+                    tokenizer=tokenizer,
+                    image_processor=image_processor,
+                    config=config,
+                    image_path=image_path,
+                    prompt=prompt,
+                    device=device,
+                    temperature=args.temperature,
+                    max_new_tokens=args.max_new_tokens,
+                    top_p=args.top_p
+                )
+            except ValueError as e:
+                if "NaN/Inf detected" in str(e):
+                    print(f"⚠ Skipping row {idx} due to NaN in model output (checkpoint issue)")
+                    print(f"   Image: {image_path}")
+                    print(f"   This suggests the checkpoint may be corrupted or incompatible.")
+                    continue
+                else:
+                    raise
             
             # Save mask
             # Ensure mask_prob is 2D (H, W) for saving
