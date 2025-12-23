@@ -157,6 +157,14 @@ class LLMSeg(nn.Module):
         self.image_encoder.eval()
         self.model.eval()
         self.mask_decoder.eval()
+        
+        # Ensure model is in float16 for inference (consistent with autocast)
+        # Check current dtype and convert if needed
+        model_dtype = next(self.model.parameters()).dtype
+        if model_dtype == torch.bfloat16:
+            # Convert to float16 for inference to match autocast
+            self.model = self.model.to(dtype=torch.float16)
+        
         with torch.no_grad():
             output_ids = self.model.generate(
                 inputs = input_ids,
@@ -177,6 +185,13 @@ class LLMSeg(nn.Module):
             else:
                 # Fallback to base_model if merged model doesn't have the method
                 model_for_embedding = self.base_model
+                # Ensure base_model is also in float16
+                if next(model_for_embedding.parameters()).dtype == torch.bfloat16:
+                    model_for_embedding = model_for_embedding.to(dtype=torch.float16)
+            
+            # Ensure image_tensor_for_vlm matches model dtype
+            if image_tensor_for_vlm.dtype != next(model_for_embedding.parameters()).dtype:
+                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=next(model_for_embedding.parameters()).dtype)
             
             prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids = input_ids_for_seg if input_ids_for_seg is not None else input_ids,

@@ -170,7 +170,8 @@ def load_image_for_vlm(image_path, image_processor, config):
         config
     )
     # Keep batch dimension (1, C, H, W) for CLIP vision tower
-    return image_tensor.to(torch.float16)
+    # Note: dtype will be matched to model dtype in generate() method
+    return image_tensor
 
 
 def save_visualization_triplet(image_path, mask_path, pred_mask_path, save_path):
