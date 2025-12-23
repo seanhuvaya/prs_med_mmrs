@@ -157,13 +157,13 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         print(f"[INFO] Model type: {model_type}, Image size: {image_size}")
 
-        # Check if checkpoint is a training checkpoint (has "model" key) or direct state_dict
-        # Load checkpoint to inspect its structure
+        # Extract checkpoint first if it's a training checkpoint, then detect model type from extracted state_dict
         import tempfile
         import os
         
         checkpoint_to_use = checkpoint_path
         temp_checkpoint_path = None
+        extracted_state_dict = None
         
         try:
             checkpoint_data = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
@@ -184,7 +184,7 @@ class SAMMed2DVisionBackbone(nn.Module):
                 
                 if has_sam_keys:
                     # Direct SAM model state_dict - use it directly
-                    actual_state_dict = model_state_dict
+                    extracted_state_dict = model_state_dict
                 else:
                     # Check if it's a nested structure (e.g., model wrapped in another layer)
                     # Try common nested structures
@@ -199,22 +199,60 @@ class SAMMed2DVisionBackbone(nn.Module):
                                     k.startswith("mask_decoder")
                                     for k in nested.keys()
                                 ):
-                                    actual_state_dict = nested
+                                    extracted_state_dict = nested
                                     print(f"[INFO] Found SAM model state_dict nested under '{key}' key")
                                     break
                         else:
                             # If no nested structure found, use the model_state_dict as-is
                             # It might be the actual state_dict but with different key structure
-                            actual_state_dict = model_state_dict
+                            extracted_state_dict = model_state_dict
                             print(f"[WARNING] Could not find standard SAM keys, using model state_dict as-is")
                     else:
-                        actual_state_dict = model_state_dict
+                        extracted_state_dict = model_state_dict
+                
+                # Always re-detect model type from extracted state_dict to ensure accuracy
+                print(f"[INFO] Detecting model type from extracted state_dict...")
+                detected_type = None
+                # Check for image_encoder.trunk dimensions (SAM-Med2D structure)
+                if 'image_encoder.trunk.patch_embed.proj.weight' in extracted_state_dict:
+                    embed_dim = extracted_state_dict['image_encoder.trunk.patch_embed.proj.weight'].shape[0]
+                    if embed_dim == 96:
+                        detected_type = "vit_b"
+                        print(f"[INFO] Detected vit_b from extracted checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 144:
+                        detected_type = "vit_l"
+                        print(f"[INFO] Detected vit_l from extracted checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 128:
+                        detected_type = "vit_h"
+                        print(f"[INFO] Detected vit_h from extracted checkpoint (embed_dim={embed_dim})")
+                # Also check for standard SAM structure (without trunk)
+                elif 'image_encoder.patch_embed.proj.weight' in extracted_state_dict:
+                    embed_dim = extracted_state_dict['image_encoder.patch_embed.proj.weight'].shape[0]
+                    if embed_dim == 768:
+                        detected_type = "vit_b"
+                        print(f"[INFO] Detected vit_b from extracted checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 1024:
+                        detected_type = "vit_l"
+                        print(f"[INFO] Detected vit_l from extracted checkpoint (embed_dim={embed_dim})")
+                    elif embed_dim == 1280:
+                        detected_type = "vit_h"
+                        print(f"[INFO] Detected vit_h from extracted checkpoint (embed_dim={embed_dim})")
+                
+                # Use detected type if found, otherwise keep the original detection
+                if detected_type is not None:
+                    if model_type is not None and model_type != detected_type:
+                        print(f"[WARNING] Model type mismatch: previously detected '{model_type}', but extracted checkpoint suggests '{detected_type}'. Using '{detected_type}'.")
+                    model_type = detected_type
+                elif model_type is None:
+                    # If we couldn't detect from extracted state_dict and no previous detection, default to vit_b
+                    model_type = "vit_b"
+                    print(f"[WARNING] Could not detect model type from extracted checkpoint, defaulting to 'vit_b'")
                 
                 # Save extracted state_dict to temporary file for SAM to load
                 temp_checkpoint = tempfile.NamedTemporaryFile(delete=False, suffix='.pth')
                 temp_checkpoint_path = temp_checkpoint.name
                 temp_checkpoint.close()
-                torch.save(actual_state_dict, temp_checkpoint_path)
+                torch.save(extracted_state_dict, temp_checkpoint_path)
                 print(f"[INFO] Saved extracted model state_dict to temporary file: {temp_checkpoint_path}")
                 checkpoint_to_use = temp_checkpoint_path
             elif isinstance(checkpoint_data, dict) and any(
@@ -226,6 +264,19 @@ class SAMMed2DVisionBackbone(nn.Module):
                 # Direct SAM model state_dict - use as is
                 print(f"[INFO] Checkpoint appears to be a direct SAM model state_dict")
                 checkpoint_to_use = checkpoint_path
+                # Re-detect model type if not already detected
+                if model_type is None or model_type == "vit_b":
+                    if 'image_encoder.patch_embed.proj.weight' in checkpoint_data:
+                        embed_dim = checkpoint_data['image_encoder.patch_embed.proj.weight'].shape[0]
+                        if embed_dim == 768:
+                            model_type = "vit_b"
+                            print(f"[INFO] Detected vit_b from checkpoint (embed_dim={embed_dim})")
+                        elif embed_dim == 1024:
+                            model_type = "vit_l"
+                            print(f"[INFO] Detected vit_l from checkpoint (embed_dim={embed_dim})")
+                        elif embed_dim == 1280:
+                            model_type = "vit_h"
+                            print(f"[INFO] Detected vit_h from checkpoint (embed_dim={embed_dim})")
             else:
                 # Unknown structure - try using as-is
                 print(f"[INFO] Checkpoint structure unclear, attempting to load as-is")
@@ -241,17 +292,15 @@ class SAMMed2DVisionBackbone(nn.Module):
         encoder = None
         last_error = None
         
-        # Try loading with the detected/specified model type
-        model_types_to_try = [model_type]
-        
-        # If auto-detection failed or we're unsure, try other variants
-        if model_type == "vit_b":
-            # Checkpoint might be misnamed - try vit_l if vit_b fails
-            model_types_to_try.extend(["vit_l", "vit_h"])
-        elif model_type == "vit_l":
-            model_types_to_try.extend(["vit_h", "vit_b"])
-        elif model_type == "vit_h":
-            model_types_to_try.extend(["vit_l", "vit_b"])
+        # Only try the detected model type - don't fallback to other types unless detection failed
+        if model_type is None:
+            # If detection completely failed, try all types in order
+            model_types_to_try = ["vit_b", "vit_l", "vit_h"]
+            print(f"[WARNING] Model type detection failed, will try all types: {model_types_to_try}")
+        else:
+            # Use only the detected model type
+            model_types_to_try = [model_type]
+            print(f"[INFO] Will try loading with detected model type: {model_type}")
         
         try:
             for try_model_type in model_types_to_try:
@@ -268,10 +317,23 @@ class SAMMed2DVisionBackbone(nn.Module):
                         f"Supported types: {list(sam_model_registry.keys())}"
                     )
                 except (RuntimeError, ValueError) as e:
-                    # Size mismatch or other loading error - try next type
+                    # Size mismatch or other loading error
                     last_error = e
                     error_msg = str(e).lower()
-                    # Check if it's a size mismatch or shape error
+                    
+                    # If we detected a specific model type, don't try others - the detection was wrong or checkpoint is corrupted
+                    if len(model_types_to_try) == 1:
+                        raise RuntimeError(
+                            f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with detected model type '{try_model_type}'.\n"
+                            f"Error: {e}\n"
+                            f"This suggests either:\n"
+                            f"  1. The checkpoint is corrupted or incomplete\n"
+                            f"  2. The checkpoint is for a different model architecture\n"
+                            f"  3. The model type detection was incorrect\n"
+                            f"Please verify the checkpoint file and model type."
+                        )
+                    
+                    # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
                     if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
                         if try_model_type != model_types_to_try[-1]:
                             print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
