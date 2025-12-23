@@ -1,22 +1,47 @@
 # PRS-Med: Position Reasoning Segmentation with Vision-Language Model
-## Run Train script
-```bash
-uv run python -m train_original \
-    --data_root /workspace/data/images_and_masks \
-    --ann_paths /workspace/data/annotations/head_and_neck.csv,/workspace/data/annotations/prostate.csv \
-    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
-    --sam_ckpt weights/tinysam_42.3.pth \
-    --batch_size 8 \
-    --epochs 20
-```
+
+This repository implements **PRS-Med** (Position Reasoning Segmentation with Vision-Language Model) as described in the [paper](https://arxiv.org/pdf/2505.11872). The implementation supports both TinySAM and SAM-Med2D vision encoders.
+
+## Quick Start
+
+### Training
 
 ```bash
-uv run python -m infer_original \
+python train.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --encoder_type tinysam \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0
+```
+
+### Training with SAM-Med2D
+
+```bash
+python train.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/sam-med2d_b.pth \
+    --encoder_type sam_med2d \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0
+```
+
+### Inference
+
+```bash
+python infer_original.py \
     --checkpoint checkpoints/llm_seg_10 \
     --vlm_path microsoft/llava-med-v1.5-mistral-7b \
     --sam_ckpt weights/tinysam_42.3.pth \
-    --data_root /workspace/data/images_and_masks \
-    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
+    --encoder_type tinysam \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv \
     --split test \
     --num_samples 10
 ```
@@ -127,42 +152,22 @@ mkdir -p weights
 
 ## 🏃 Quick Start
 
-### Using Original PRS-Med Implementation
+### Implementation Details
 
-This repository includes an exact implementation matching the original PRS-Med paper (`train_original.py`). This uses the exact model architecture, loss functions, and training procedure from the original repository.
+This repository implements the exact PRS-Med architecture from the paper:
+- **Model**: `LLMSeg` with `PromptedMaskDecoder` (from `mask_decoder_v5.py`)
+- **Loss**: `structure_loss` (weighted BCE + IoU) + classification loss + LLM loss
+- **Vision Encoders**: Supports both TinySAM and SAM-Med2D
+- **MLLM**: LLaVA-Med with LoRA adaptation
 
-**Prerequisites:**
-- The parent `PRS-Med` repository must be accessible (for LLaVA imports)
-- Or ensure LLaVA dependencies are installed
-
-**Training with Original Implementation:**
-```bash
-python train.py \
-    --data_root /path/to/data_v2 \
-    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
-    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
-    --sam_ckpt /path/to/tinysam_42.3.pth \
-    --batch_size 4 \
-    --epochs 20 \
-    --device cuda:0 \
-    --save_dir ./checkpoints
-```
-
-**Note:** You can use either:
-- **Hugging Face model ID**: `microsoft/llava-med-v1.5-mistral-7b` (automatically downloads from HF)
-- **Local path**: `/path/to/llava-med-v1.5-mistral-7b` (if you've already downloaded it)
-
-**Key differences from `train_prs_med.py`:**
-- Uses exact `LLMSeg` model from original paper
-- Uses `PromptedMaskDecoder` from `mask_decoder_v5.py`
-- Uses `structure_loss` from original loss.py
-- Supports multiple annotation CSV files via `--ann_paths`
-- Works with `data_v2` folder structure (head_and_neck/, prostate/, etc.)
-
-**Data format for original implementation:**
+**Data Format:**
 - CSV columns: `image_path` (or `image_name`), `question`, `answer`, `position` (optional), `split`
 - Supports `data_v2/` structure: `{task}/{split}_images/` and `{task}/{split}_masks/`
 - If using `image_name`, the script will construct paths automatically
+
+**Vision Encoder Options:**
+- `--encoder_type tinysam`: Use TinySAM encoder (default, lightweight)
+- `--encoder_type sam_med2d`: Use SAM-Med2D encoder (better for medical images)
 
 ### 1. Prepare Your Data
 
@@ -184,24 +189,30 @@ CSV format should include columns: `image_path`, `mask_path`, `question`, `answe
 
 ### 2. Train the Model
 
-**Single GPU Training (New Implementation):**
+**Training with TinySAM (default):**
 ```bash
-python train_prs_med.py \
-    --data_root ./data \
-    --batch_size 8 \
-    --learning_rate 1e-4 \
-    --num_epochs 20 \
-    --checkpoint_dir ./checkpoints
+python train.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv,/path/to/annotations/prostate.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --encoder_type tinysam \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0
 ```
 
-**Multi-GPU Training:**
+**Training with SAM-Med2D:**
 ```bash
-./run_multi_gpu_train.sh ./data 4  # 4 GPUs
-```
-
-**80GB GPU (Optimized):**
-```bash
-./train_80gb_gpu.sh ./data
+python train.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/sam-med2d_b.pth \
+    --encoder_type sam_med2d \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0
 ```
 
 ### 3. Evaluate the Model
@@ -216,47 +227,46 @@ python evaluation/benchmark_prs_med.py \
 
 ```
 prs_med_mmrs/
-├── train_prs_med.py              # Main training script
+├── train.py                      # Main training script (original PRS-Med implementation)
+├── infer_original.py             # Inference script (original PRS-Med implementation)
 ├── evaluation/
 │   └── benchmark_prs_med.py      # Evaluation and benchmarking
 ├── models/
-│   ├── vision_backbone/          # TinySAM vision encoder
-│   │   ├── tiny_sam_encoder.py
-│   │   └── tinysam/              # TinySAM implementation
-│   ├── mllm/                     # Multimodal LLM (LLaVA-Med)
-│   │   ├── llava_med_mllm.py
-│   │   └── llava_med_lora_adapter.py
-│   ├── decoder/                  # Decoder modules
-│   │   ├── fusion_module.py      # Feature fusion
-│   │   └── mask_prediction_module.py  # Mask generation
+│   ├── llm_seg_original.py       # LLMSeg model (original PRS-Med architecture)
+│   ├── vision_backbone/          # Vision encoders
+│   │   ├── sam_med2d_encoder.py  # SAM-Med2D encoder
+│   │   └── tiny_sam_encoder.py  # TinySAM encoder
+│   ├── decoder/
+│   │   └── mask_decoder_original.py  # PromptedMaskDecoder (from paper)
 │   └── loss/
-│       └── objective_function.py # Loss functions
+│       └── original_loss.py      # Loss functions (structure_loss, dice_score, etc.)
 ├── data/
 │   └── dataset.py                # Dataset and data loaders
-├── configs/
-│   └── hyperparameters.py        # Training hyperparameters
-├── weights/                       # Model checkpoints
-│   └── tinysam_42.3.pth
-├── checkpoints/                   # Training checkpoints
-├── run_multi_gpu_train.sh        # Multi-GPU training script
-├── train_80gb_gpu.sh            # Optimized script for large GPUs
-├── MEMORY_OPTIMIZATION.md        # Memory optimization guide
-├── MULTI_GPU_TRAINING.md         # Multi-GPU training guide
-└── REPRODUCIBILLITY.md           # Reproducibility guide
+├── data_utils/
+│   └── utils.py                  # Data utilities (load_image, load_annotation, etc.)
+├── llava/                        # LLaVA-Med implementation
+├── weights/                      # Model checkpoints
+│   ├── tinysam_42.3.pth
+│   └── sam-med2d_b.pth
+└── checkpoints/                   # Training checkpoints
 ```
+
+**Note:** `train_prs_med.py` is an alternative implementation with a different architecture. Use `train.py` for the original PRS-Med paper implementation.
 
 ## 🎓 Training
 
 ### Basic Training
 
 ```bash
-python train_prs_med.py \
-    --data_root /path/to/data \
-    --batch_size 8 \
-    --learning_rate 1e-4 \
-    --num_epochs 20 \
-    --image_size 1024 \
-    --checkpoint_dir ./checkpoints
+python train.py \
+    --data_root /path/to/data_v2 \
+    --ann_paths /path/to/annotations/head_and_neck.csv \
+    --vlm_path microsoft/llava-med-v1.5-mistral-7b \
+    --sam_ckpt weights/tinysam_42.3.pth \
+    --encoder_type tinysam \
+    --batch_size 4 \
+    --epochs 20 \
+    --device cuda:0
 ```
 
 ### Training Options
@@ -264,18 +274,19 @@ python train_prs_med.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--data_root` | Required | Path to data directory |
-| `--batch_size` | 8 | Batch size per GPU |
+| `--ann_paths` | Required | Comma-separated paths to annotation CSV files |
+| `--vlm_path` | Required | Path to LLaVA-Med model (HF ID or local path) |
+| `--sam_ckpt` | Required | Path to vision encoder checkpoint |
+| `--encoder_type` | `tinysam` | Vision encoder: `tinysam` or `sam_med2d` |
+| `--sam_model_type` | `vit_t` | TinySAM model type (ignored for SAM-Med2D) |
+| `--batch_size` | 4 | Batch size per GPU |
 | `--learning_rate` | 1e-4 | Learning rate |
-| `--num_epochs` | 20 | Number of training epochs |
+| `--epochs` | 20 | Number of training epochs |
 | `--image_size` | 1024 | Input image size |
-| `--lora_rank` | 16 | LoRA rank |
-| `--lora_alpha` | 16 | LoRA alpha |
-| `--lambda_seg` | 1.0 | Segmentation loss weight |
-| `--lambda_txt` | 0.5 | Text loss weight |
-| `--use_amp` | True | Enable mixed precision training |
-| `--gradient_accumulation_steps` | 1 | Gradient accumulation steps |
-| `--gradient_checkpointing` | False | Enable gradient checkpointing |
-| `--compile_model` | False | Compile model with torch.compile |
+| `--device` | `cuda:0` | Device to use |
+| `--save_dir` | `./checkpoints` | Directory to save checkpoints |
+| `--cls_loss_weight` | 0.5 | Classification loss weight |
+| `--cls_loss_epochs` | 5 | Number of epochs to use classification loss |
 
 ### Memory Optimization
 
@@ -328,33 +339,31 @@ python evaluation/benchmark_prs_med.py \
 
 ### Components
 
-1. **TinySAM Vision Backbone**: Lightweight image encoder
+1. **Vision Encoder**: Supports both TinySAM and SAM-Med2D
    - Input: 1024×1024 medical images
    - Output: 256-channel feature maps (16×16)
+   - TinySAM: Lightweight, efficient
+   - SAM-Med2D: Medical-domain pretrained, better performance
 
 2. **LLaVA-Med MLLM**: Multimodal language model
    - Base: Mistral-7B with LoRA adaptation
    - Processes images and text prompts
-   - Output: Multimodal embeddings
+   - Output: Multimodal embeddings (hidden states)
 
-3. **Fusion Module**: Cross-attention fusion
-   - Combines visual and textual features
-   - Output: Fused 256-channel features
-
-4. **Mask Prediction Module**: Decoder
+3. **PromptedMaskDecoder**: Transformer-based decoder
+   - Cross-attention between image features and prompt embeddings
+   - Transformer encoder layers for feature refinement
    - Upsamples from 16×16 to 1024×1024
    - Generates binary segmentation masks
 
 ### Forward Pass
 
 ```
-Image (1024×1024) → TinySAM → Visual Features (256×16×16)
+Image (1024×1024) → Vision Encoder → Visual Features (256×16×16)
                                  ↓
-Text Prompt → LLaVA-Med → Multimodal Embeddings
+Text Prompt → LLaVA-Med → Prompt Embeddings
                                  ↓
-                    Fusion Module → Fused Features
-                                 ↓
-                    Mask Predictor → Mask (1024×1024)
+                    PromptedMaskDecoder → Mask (1024×1024)
 ```
 
 ## 💾 Memory Optimization
