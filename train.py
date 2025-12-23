@@ -32,9 +32,17 @@ def evaluate(model, val_loader, device="cuda:0"):
         image_tensor = batch['image_tensor'].to(device)
         mask_tensor = batch['mask_tensor'].to(device)
         image_sam_tensor = batch['image_sam'].to(device)
+        attention_mask = batch['attention_masks'].to(device)
+        answers_ids = batch['answers_ids'].to(device)
         
         with torch.no_grad():
-            outputs, _ = model(input_ids, image_tensor, image_sam_tensor)
+            outputs, _ = model(
+                input_ids=input_ids,
+                image_tensor_for_vlm=image_tensor,
+                image_tensor_for_image_enc=image_sam_tensor,
+                attention_mask=attention_mask,
+                answers=answers_ids
+            )
             dice_score_value = dice_score(outputs, mask_tensor)
             dice_score_list.append(dice_score_value.item())
     
