@@ -218,68 +218,69 @@ class SAMMed2DVisionBackbone(nn.Module):
             print(f"[INFO] Will try loading with detected model type: {model_type}")
         
         # Try loading SAM-Med2D using their official API
-        for try_model_type in model_types_to_try:
-            try:
-                print(f"[INFO] Loading SAM-Med2D model with type '{try_model_type}' using official API...")
-                print(f"[INFO] Using args: image_size={args.image_size}, encoder_adapter={args.encoder_adapter}, checkpoint={args.sam_checkpoint}")
-                
-                # Load using SAM-Med2D's official API: sam_model_registry[model_type](args)
-                # This is how SAM-Med2D loads models according to their repository
-                sam_model = sam_model_registry[try_model_type](args)
-                encoder = sam_model.image_encoder
-                
-                print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
-                model_type = try_model_type  # Update to the successful type
-                break
-            except KeyError:
-                raise ValueError(
-                    f"Invalid model type '{try_model_type}'. "
-                    f"Supported types: {list(sam_model_registry.keys())}"
-                )
-            except (RuntimeError, ValueError, TypeError) as e:
-                # Check if the error is because sam_model_registry doesn't accept args
-                # In that case, fall back to checkpoint-based loading
-                error_msg = str(e).lower()
-                last_error = e
-                
-                if "unexpected keyword argument" in error_msg or "takes" in error_msg and "positional" in error_msg:
-                    print(f"[WARNING] SAM-Med2D registry doesn't accept args, trying checkpoint-based loading...")
-                    # Fall back to checkpoint-based loading
-                    try:
-                        sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
-                        encoder = sam_model.image_encoder
-                        print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} using checkpoint-based loading")
-                        model_type = try_model_type
-                        break
-                    except Exception as e2:
-                        last_error = e2
-                        if try_model_type == model_types_to_try[-1]:
-                            raise RuntimeError(
-                                f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}'.\n"
-                                f"Tried both args-based and checkpoint-based loading.\n"
-                                f"Last error: {e2}"
-                            )
-                        continue
-                
-                # If we detected a specific model type, don't try others
-                if len(model_types_to_try) == 1:
-                    raise RuntimeError(
-                        f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with detected model type '{try_model_type}'.\n"
-                        f"Error: {e}\n"
-                        f"This suggests either:\n"
-                        f"  1. The checkpoint is corrupted or incomplete\n"
-                        f"  2. The checkpoint is for a different model architecture\n"
-                        f"  3. The model type detection was incorrect\n"
-                        f"Please verify the checkpoint file and model type."
+        try:
+            for try_model_type in model_types_to_try:
+                try:
+                    print(f"[INFO] Loading SAM-Med2D model with type '{try_model_type}' using official API...")
+                    print(f"[INFO] Using args: image_size={args.image_size}, encoder_adapter={args.encoder_adapter}, checkpoint={args.sam_checkpoint}")
+                    
+                    # Load using SAM-Med2D's official API: sam_model_registry[model_type](args)
+                    # This is how SAM-Med2D loads models according to their repository
+                    sam_model = sam_model_registry[try_model_type](args)
+                    encoder = sam_model.image_encoder
+                    
+                    print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
+                    model_type = try_model_type  # Update to the successful type
+                    break
+                except KeyError:
+                    raise ValueError(
+                        f"Invalid model type '{try_model_type}'. "
+                        f"Supported types: {list(sam_model_registry.keys())}"
                     )
-                
-                # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
-                if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
-                    if try_model_type != model_types_to_try[-1]:
-                        print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
-                        continue
-                
-                # If it's the last attempt, raise the error
+                except (RuntimeError, ValueError, TypeError) as e:
+                    # Check if the error is because sam_model_registry doesn't accept args
+                    # In that case, fall back to checkpoint-based loading
+                    error_msg = str(e).lower()
+                    last_error = e
+                    
+                    if "unexpected keyword argument" in error_msg or "takes" in error_msg and "positional" in error_msg:
+                        print(f"[WARNING] SAM-Med2D registry doesn't accept args, trying checkpoint-based loading...")
+                        # Fall back to checkpoint-based loading
+                        try:
+                            sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_path)
+                            encoder = sam_model.image_encoder
+                            print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} using checkpoint-based loading")
+                            model_type = try_model_type
+                            break
+                        except Exception as e2:
+                            last_error = e2
+                            if try_model_type == model_types_to_try[-1]:
+                                raise RuntimeError(
+                                    f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}'.\n"
+                                    f"Tried both args-based and checkpoint-based loading.\n"
+                                    f"Last error: {e2}"
+                                )
+                            continue
+                    
+                    # If we detected a specific model type, don't try others
+                    if len(model_types_to_try) == 1:
+                        raise RuntimeError(
+                            f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with detected model type '{try_model_type}'.\n"
+                            f"Error: {e}\n"
+                            f"This suggests either:\n"
+                            f"  1. The checkpoint is corrupted or incomplete\n"
+                            f"  2. The checkpoint is for a different model architecture\n"
+                            f"  3. The model type detection was incorrect\n"
+                            f"Please verify the checkpoint file and model type."
+                        )
+                    
+                    # Check if it's a size mismatch or shape error - only try next if we're trying multiple types
+                    if ("size mismatch" in error_msg or "shape" in error_msg or "copying a param" in error_msg or "missing key" in error_msg):
+                        if try_model_type != model_types_to_try[-1]:
+                            print(f"[WARNING] Size/shape/key mismatch with '{try_model_type}', trying next model type...")
+                            continue
+                    
+                    # If it's the last attempt, raise the error
                     if try_model_type == model_types_to_try[-1]:
                         raise RuntimeError(
                             f"Failed to load SAM-Med2D checkpoint '{checkpoint_path}' with any model type.\n"
