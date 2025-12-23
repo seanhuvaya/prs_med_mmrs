@@ -268,6 +268,29 @@ def load_model(args):
     if model.mask_decoder is not None:
         num_params = sum(p.numel() for p in model.mask_decoder.parameters())
         print(f"  - Mask decoder params: {num_params:,}")
+        
+        # Check for NaN/Inf in mask decoder weights (indicates uninitialized or corrupted weights)
+        has_nan = False
+        has_inf = False
+        for name, param in model.mask_decoder.named_parameters():
+            if torch.isnan(param).any():
+                print(f"  ⚠ WARNING: NaN detected in mask_decoder.{name}")
+                has_nan = True
+            if torch.isinf(param).any():
+                print(f"  ⚠ WARNING: Inf detected in mask_decoder.{name}")
+                has_inf = True
+        
+        if has_nan or has_inf:
+            print(f"  ✗ ERROR: Mask decoder has NaN/Inf weights! Checkpoint may be corrupted or not loaded correctly.")
+            print(f"     Checkpoint path: {args.checkpoint}")
+            print(f"     Expected files: mask_decoder.pth should exist in checkpoint directory")
+        else:
+            # Check if weights are all zeros (uninitialized)
+            all_zeros = all(torch.allclose(p, torch.zeros_like(p)) for p in model.mask_decoder.parameters())
+            if all_zeros:
+                print(f"  ⚠ WARNING: Mask decoder weights are all zeros! Checkpoint may not have been loaded.")
+            else:
+                print(f"  ✓ Mask decoder weights appear valid (no NaN/Inf, not all zeros)")
     
     return model, tokenizer, image_processor, config
 
@@ -321,17 +344,43 @@ def infer_single(
     
     # Run inference
     model.eval()
-    with autocast(dtype=torch.float16):
-        with torch.no_grad():
-            output_mask, output_ids = model.generate(
-                input_ids=input_ids,
-                input_ids_for_seg=input_ids_for_seg,
-                image_tensor_for_vlm=image_tensor,
-                image_tensor_for_image_enc=image_tensor_for_sam,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                top_p=top_p
-            )
+    
+    # Check for NaN/Inf in inputs before forward pass
+    if torch.isnan(image_tensor).any() or torch.isinf(image_tensor).any():
+        raise ValueError(f"NaN/Inf detected in image_tensor for {image_path}")
+    if torch.isnan(image_tensor_for_sam).any() or torch.isinf(image_tensor_for_sam).any():
+        raise ValueError(f"NaN/Inf detected in image_tensor_for_sam for {image_path}")
+    
+    # Ensure mask decoder uses float32 to avoid numerical instability
+    original_dtype = next(model.mask_decoder.parameters()).dtype
+    model.mask_decoder = model.mask_decoder.float()
+    
+    try:
+        with autocast(dtype=torch.float16):
+            with torch.no_grad():
+                output_mask, output_ids = model.generate(
+                    input_ids=input_ids,
+                    input_ids_for_seg=input_ids_for_seg,
+                    image_tensor_for_vlm=image_tensor,
+                    image_tensor_for_image_enc=image_tensor_for_sam,
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                    top_p=top_p
+                )
+    finally:
+        # Restore original dtype
+        model.mask_decoder = model.mask_decoder.to(dtype=original_dtype)
+    
+    # Check for NaN in output
+    if torch.isnan(output_mask).any() or torch.isinf(output_mask).any():
+        raise ValueError(
+            f"NaN/Inf detected in output_mask for {image_path}.\n"
+            "This indicates a model issue. Possible causes:\n"
+            "  1. Checkpoint not loaded correctly (check checkpoint path)\n"
+            "  2. Model weights are corrupted or uninitialized\n"
+            "  3. Numerical instability in mask decoder\n"
+            "  4. Wrong model architecture for this checkpoint"
+        )
     
     # Process outputs
     # Debug: print raw output values for first few samples
@@ -400,6 +449,15 @@ def main():
             image_path = row['image_path']
             if not os.path.isabs(image_path):
                 image_path = os.path.join(args.data_root, image_path)
+            # Fix: if image_path points to a mask directory, correct it
+            if '_masks' in image_path:
+                image_path = image_path.replace('_masks', '_images')
+                # Also fix file extension if needed (masks are often .png, images might be .jpg)
+                if image_path.endswith('.png') and not os.path.exists(image_path):
+                    # Try .jpg extension
+                    image_path_jpg = image_path.replace('.png', '.jpg')
+                    if os.path.exists(image_path_jpg):
+                        image_path = image_path_jpg
         elif 'image_name' in row:
             split = row.get('split', args.split)
             task = row.get('task', 'head_and_neck')
@@ -414,6 +472,10 @@ def main():
         # Debug: print image path for first few samples
         if idx < 3:
             print(f"Processing image {idx}: {image_path}")
+            if not os.path.exists(image_path):
+                print(f"  WARNING: Image file does not exist!")
+            elif '_masks' in image_path:
+                print(f"  WARNING: Image path still contains '_masks' - this might be wrong!")
         
         # Get prompt
         prompt = row.get('question', '')
