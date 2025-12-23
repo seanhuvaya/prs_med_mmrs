@@ -40,8 +40,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-if [[ $# -ne 3 ]]; then
-    echo -e "${RED}Error: Expected 3 arguments.${NC}\n"
+if [[ $# -ne 4 ]]; then
+    echo -e "${RED}Error: Expected 4 arguments.${NC}\n"
     usage
     exit 1
 fi
