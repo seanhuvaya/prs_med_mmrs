@@ -259,18 +259,29 @@ class SAMMed2DVisionBackbone(nn.Module):
                             print(f"[DEBUG] Model pos_embed shape: {model_pos_embed.shape}")
                             print(f"[DEBUG] Model expects image_size={model_img_size} (patches: {model_patch_h}x{model_patch_w})")
                         
-                        # Also check rel_pos in model to verify
+                        # Also check rel_pos in model to verify - this is the ground truth
+                        model_rel_pos_sizes = {}
                         for name, param in sam_model.image_encoder.named_parameters():
                             if 'rel_pos_h' in name or 'rel_pos_w' in name:
                                 if len(param.shape) == 2:
                                     model_rel_pos_size = param.shape[0]
+                                    model_rel_pos_sizes[name] = model_rel_pos_size
                                     model_patch_from_rel = (model_rel_pos_size + 1) // 2
                                     model_img_from_rel = model_patch_from_rel * 16
                                     print(f"[DEBUG] Model {name} shape: {param.shape}, implies patch_size={model_patch_from_rel}, image_size={model_img_from_rel}")
-                                    if model_img_size is None:
-                                        model_img_size = model_img_from_rel
-                                        model_patch_size = model_patch_from_rel
-                                    break
+                        
+                        # Use rel_pos to determine model size (more reliable than pos_embed)
+                        if model_rel_pos_sizes:
+                            # Get the most common rel_pos size
+                            rel_pos_size_counts = {}
+                            for size in model_rel_pos_sizes.values():
+                                rel_pos_size_counts[size] = rel_pos_size_counts.get(size, 0) + 1
+                            most_common_size = max(rel_pos_size_counts.items(), key=lambda x: x[1])[0]
+                            model_patch_size = (most_common_size + 1) // 2
+                            model_img_size = model_patch_size * 16
+                            print(f"[DEBUG] Model rel_pos sizes: {set(model_rel_pos_sizes.values())}")
+                            print(f"[DEBUG] Most common rel_pos size: {most_common_size} -> patch_size={model_patch_size}, image_size={model_img_size}")
+                            print(f"[DEBUG] Using model image_size={model_img_size} (patch_size={model_patch_size})")
                         
                         # Load checkpoint and detect its size
                         print(f"[DEBUG] Loading checkpoint from: {checkpoint_to_use}")
@@ -318,7 +329,7 @@ class SAMMed2DVisionBackbone(nn.Module):
                                 print(f"[DEBUG] Will resize all rel_pos to match model size")
                         
                         # Resize if sizes don't match
-                        if checkpoint_img_size is not None and model_img_size is not None:
+                        if checkpoint_img_size is not None and model_img_size is not None and model_patch_size is not None:
                             if checkpoint_img_size != model_img_size:
                                 print(f"[DEBUG] ========== RESIZING NEEDED ==========")
                                 print(f"[DEBUG] Checkpoint: {checkpoint_img_size}x{checkpoint_img_size} ({checkpoint_patch_size}x{checkpoint_patch_size} patches)")
@@ -340,31 +351,68 @@ class SAMMed2DVisionBackbone(nn.Module):
                                     checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
                                     print(f"[DEBUG] pos_embed resized: {checkpoint_state['image_encoder.pos_embed'].shape}")
                                 
-                                # Resize ALL relative position embeddings consistently
-                                new_rel_pos_size = 2 * model_patch_size - 1
-                                print(f"[DEBUG] Target rel_pos size: {new_rel_pos_size} (for {model_patch_size}x{model_patch_size} patches)")
+                                # Resize ALL relative position embeddings to match model's expected size
+                                # Use the actual model rel_pos sizes (may vary by block)
                                 resized_count = 0
                                 for key in list(checkpoint_state.keys()):
                                     if 'rel_pos_h' in key or 'rel_pos_w' in key:
+                                        # Find corresponding model parameter to get target size
+                                        # Key format: "image_encoder.blocks.X.attn.rel_pos_h/w"
+                                        target_size = None
+                                        for model_key in model_rel_pos_sizes.keys():
+                                            # Extract block number from both keys
+                                            # checkpoint: "image_encoder.blocks.0.attn.rel_pos_h"
+                                            # model: "blocks.0.attn.rel_pos_h" or "image_encoder.blocks.0.attn.rel_pos_h"
+                                            checkpoint_parts = key.split('.')
+                                            model_parts = model_key.split('.')
+                                            
+                                            # Find block indices
+                                            checkpoint_block_idx = None
+                                            model_block_idx = None
+                                            for i, part in enumerate(checkpoint_parts):
+                                                if part == 'blocks' and i + 1 < len(checkpoint_parts):
+                                                    checkpoint_block_idx = checkpoint_parts[i + 1]
+                                                    break
+                                            for i, part in enumerate(model_parts):
+                                                if part == 'blocks' and i + 1 < len(model_parts):
+                                                    model_block_idx = model_parts[i + 1]
+                                                    break
+                                            
+                                            # Match block number and rel_pos type (h/w)
+                                            if checkpoint_block_idx == model_block_idx:
+                                                checkpoint_rel_type = 'rel_pos_h' if 'rel_pos_h' in key else 'rel_pos_w'
+                                                model_rel_type = 'rel_pos_h' if 'rel_pos_h' in model_key else 'rel_pos_w'
+                                                if checkpoint_rel_type == model_rel_type:
+                                                    target_size = model_rel_pos_sizes[model_key]
+                                                    break
+                                        
+                                        # Fallback to most common size if not found
+                                        if target_size is None:
+                                            target_size = most_common_size
+                                            print(f"[DEBUG] Could not find matching model key for {key}, using most common size {target_size}")
+                                        
                                         old_rel_pos = checkpoint_state[key]
                                         if len(old_rel_pos.shape) == 2:
                                             old_size = old_rel_pos.shape[0]
-                                            print(f"[DEBUG] Resizing {key} from [{old_size}] to [{new_rel_pos_size}]...")
-                                            old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
-                                            new_rel_pos_expanded = torch.nn.functional.interpolate(
-                                                old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
-                                                size=(1, new_rel_pos_size),
-                                                mode='bilinear',
-                                                align_corners=False
-                                            ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
-                                            checkpoint_state[key] = new_rel_pos_expanded
-                                            print(f"[DEBUG] {key} resized: {checkpoint_state[key].shape}")
-                                            resized_count += 1
+                                            if old_size != target_size:
+                                                print(f"[DEBUG] Resizing {key} from [{old_size}] to [{target_size}]...")
+                                                old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
+                                                new_rel_pos_expanded = torch.nn.functional.interpolate(
+                                                    old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
+                                                    size=(1, target_size),
+                                                    mode='bilinear',
+                                                    align_corners=False
+                                                ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
+                                                checkpoint_state[key] = new_rel_pos_expanded
+                                                print(f"[DEBUG] {key} resized: {checkpoint_state[key].shape}")
+                                                resized_count += 1
+                                            else:
+                                                print(f"[DEBUG] {key} already has correct size [{target_size}], skipping")
                                 print(f"[DEBUG] Resized {resized_count} relative position embedding(s)")
                             else:
                                 print(f"[DEBUG] Checkpoint and model have matching image_size={checkpoint_img_size}, no resizing needed")
                         else:
-                            print(f"[WARNING] Could not detect sizes - checkpoint_img_size={checkpoint_img_size}, model_img_size={model_img_size}")
+                            print(f"[WARNING] Could not detect sizes - checkpoint_img_size={checkpoint_img_size}, model_img_size={model_img_size}, model_patch_size={model_patch_size}")
                             print(f"[DEBUG] Attempting to load as-is...")
                         
                         # Load with strict=False to handle any remaining missing/unexpected keys
