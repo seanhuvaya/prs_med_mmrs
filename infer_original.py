@@ -377,8 +377,10 @@ def infer_single(
         raise ValueError(f"NaN/Inf detected in image_tensor_for_sam for {image_path}")
     
     # Ensure mask decoder uses float32 to avoid numerical instability
+    # The generate() method will handle excluding mask decoder from autocast
     original_dtype = next(model.mask_decoder.parameters()).dtype
     model.mask_decoder = model.mask_decoder.float()
+    model.mask_decoder.eval()  # Ensure eval mode
     
     try:
         with autocast(dtype=torch.float16):
