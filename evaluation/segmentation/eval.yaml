@@ -1,8 +1,0 @@
-Eval:
-    gt_root: "/path/to/gt_root"  # e.g., /path/to/data_v2
-    pred_root: "/path/to/pred_root"  # e.g., /path/to/pred_masks_root
-    result_path: "seg_results_prs_med_mmrs"
-    datasets: ['brain_tumors_ct_scan', 'breast_tumors_ct_scan', 'lung_CT', 'lung_Xray', 'polyp_endoscopy', 'skin_rgbimage']
-    metrics: ['meanDic', 'meanIoU', 'wFm', 'Sm', 'meanEm', 'mae', 'maxEm', 'maxDic', 'maxIoU', 'meanSen', 'maxSen', 'meanSpe', 'maxSpe']
-
-

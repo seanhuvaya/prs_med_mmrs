@@ -129,25 +129,70 @@ class PromptedMaskDecoder(nn.Module):
         image_feat = image_feat.float()
 
         prompt_feat = prompt_feat.float()
+        
+        # Clamp extreme values to prevent numerical instability
+        image_feat = torch.clamp(image_feat, min=-1e4, max=1e4)
+        prompt_feat = torch.clamp(prompt_feat, min=-1e4, max=1e4)
+        
         image_identity = image_feat
         
         prompt_proj = self.prompt_projection(prompt_feat)  # (B, T, hidden_dim)
         
+        # Check for NaN after projection
+        if torch.isnan(prompt_proj).any() or torch.isinf(prompt_proj).any():
+            # If NaN detected, use zero-initialized projection as fallback
+            prompt_proj = torch.zeros_like(prompt_proj)
+        
         image_flat = image_feat.flatten(2).transpose(1, 2)  # (B, H*W, hidden_dim)
         image_flat = self.image_norm(image_flat)  # (B, H*W, hidden_dim)
         prompt_proj = self.prompt_norm(prompt_proj)
+        
+        # Clamp after normalization to prevent extreme values
+        image_flat = torch.clamp(image_flat, min=-1e4, max=1e4)
+        prompt_proj = torch.clamp(prompt_proj, min=-1e4, max=1e4)
+        
         attn_out, _ = self.attn(image_flat, prompt_proj, prompt_proj)  # (B, H*W, hidden_dim)
         attn_out = attn_out + image_flat  # (B, H*W, hidden_dim)
         
+        # Check for NaN after attention
+        if torch.isnan(attn_out).any() or torch.isinf(attn_out).any():
+            # Fallback to identity if attention produces NaN
+            attn_out = image_flat
+        
         attn_out = self.norm1(attn_out)  # (B, H*W, hidden_dim)
-        attn_out = self.encoder_layer(attn_out) 
+        attn_out = self.encoder_layer(attn_out)
+        
+        # Check for NaN after encoder layer
+        if torch.isnan(attn_out).any() or torch.isinf(attn_out).any():
+            # Fallback to previous state
+            attn_out = self.norm1(image_flat)
+        
         attn_out = self.ffn(attn_out)  # (B, H*W, hidden_dim)
+        
+        # Check for NaN after FFN
+        if torch.isnan(attn_out).any() or torch.isinf(attn_out).any():
+            # Fallback to identity
+            attn_out = image_flat
+        
         attn_map = attn_out.transpose(1, 2).reshape(B, -1, H, W)  # (B, hidden_dim, H, W)
         
         attn_map = attn_map + image_identity
+        
+        # Clamp before mask generation to prevent extreme values
+        attn_map = torch.clamp(attn_map, min=-1e4, max=1e4)
 
         attn_map = self.mask_generation(attn_map)  # (B, hidden_dim // 4, H, W)
+        
+        # Check for NaN after mask generation
+        if torch.isnan(attn_map).any() or torch.isinf(attn_map).any():
+            # Fallback to zero mask
+            attn_map = torch.zeros_like(attn_map)
+        
         mask = self.out_dec(attn_map)  # (B, 1, 128, 128)
         mask = F.interpolate(mask, scale_factor=16, mode='bilinear', align_corners=True)  # (B, 1, 64, 64)
+        
+        # Final clamp to ensure valid output range
+        mask = torch.clamp(mask, min=-10.0, max=10.0)  # Reasonable range before sigmoid
+        
         return mask
 

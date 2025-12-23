@@ -260,9 +260,26 @@ class LLMSeg(nn.Module):
             if torch.isnan(image_embedding).any() or torch.isinf(image_embedding).any():
                 raise RuntimeError(f"NaN/Inf detected in image_embedding. Shape: {image_embedding.shape}")
             
-            final_mask = self.mask_decoder(
-                image_embedding, prompt_embedding
-            )
+            # Ensure mask decoder runs in float32 and outside autocast for numerical stability
+            # Disable autocast for mask decoder to prevent dtype mismatch
+            import torch.cuda.amp as amp
+            with amp.autocast(enabled=False):  # Disable autocast for mask decoder
+                # Ensure embeddings are float32
+                image_embedding_f32 = image_embedding.float()
+                prompt_embedding_f32 = prompt_embedding.float()
+                
+                # Ensure mask decoder is in float32
+                mask_decoder_dtype = next(self.mask_decoder.parameters()).dtype
+                if mask_decoder_dtype != torch.float32:
+                    self.mask_decoder = self.mask_decoder.float()
+                
+                final_mask = self.mask_decoder(
+                    image_embedding_f32, prompt_embedding_f32
+                )
+                
+                # Restore mask decoder dtype if changed
+                if mask_decoder_dtype != torch.float32:
+                    self.mask_decoder = self.mask_decoder.to(dtype=mask_decoder_dtype)
         return final_mask, output_ids
 
     def forward(self,
