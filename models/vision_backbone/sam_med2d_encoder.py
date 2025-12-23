@@ -302,11 +302,92 @@ class SAMMed2DVisionBackbone(nn.Module):
             model_types_to_try = [model_type]
             print(f"[INFO] Will try loading with detected model type: {model_type}")
         
+        # Detect checkpoint image size from position embeddings
+        checkpoint_image_size = None
+        try:
+            checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
+            if 'image_encoder.pos_embed' in checkpoint_state:
+                pos_embed_shape = checkpoint_state['image_encoder.pos_embed'].shape
+                # pos_embed shape is [1, H, W, C] where H=W=image_size/patch_size
+                # patch_size is typically 16 for SAM
+                if len(pos_embed_shape) == 4:
+                    patch_h, patch_w = pos_embed_shape[1], pos_embed_shape[2]
+                    checkpoint_image_size = patch_h * 16  # Assuming patch_size=16
+                    print(f"[INFO] Detected checkpoint image size: {checkpoint_image_size}x{checkpoint_image_size} (from pos_embed shape {pos_embed_shape})")
+        except Exception as e:
+            print(f"[WARNING] Could not detect checkpoint image size: {e}")
+        
+        # If checkpoint has different image size, we'll need to resize position embeddings
+        needs_resize = checkpoint_image_size is not None and checkpoint_image_size != image_size
+        
         try:
             for try_model_type in model_types_to_try:
                 try:
                     print(f"[INFO] Trying to build SAM-Med2D model with type '{try_model_type}'...")
-                    sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_to_use)
+                    
+                    # Build model without checkpoint first if we need to resize
+                    if needs_resize:
+                        print(f"[INFO] Checkpoint image size ({checkpoint_image_size}) differs from target ({image_size}), will resize position embeddings")
+                        # Build model without loading checkpoint
+                        sam_model = sam_model_registry[try_model_type](checkpoint=None)
+                        
+                        # Load checkpoint state dict
+                        checkpoint_state = torch.load(checkpoint_to_use, map_location='cpu', weights_only=False)
+                        
+                        # Resize position embeddings
+                        if 'image_encoder.pos_embed' in checkpoint_state:
+                            old_pos_embed = checkpoint_state['image_encoder.pos_embed']
+                            # old_pos_embed shape: [1, H_old, W_old, C]
+                            # new_pos_embed shape: [1, H_new, W_new, C]
+                            old_h, old_w = old_pos_embed.shape[1], old_pos_embed.shape[2]
+                            new_h = image_size // 16  # patch_size = 16
+                            new_w = image_size // 16
+                            
+                            # Resize using interpolation
+                            old_pos_embed_2d = old_pos_embed.squeeze(0).permute(2, 0, 1)  # [C, H, W]
+                            new_pos_embed_2d = torch.nn.functional.interpolate(
+                                old_pos_embed_2d.unsqueeze(0),
+                                size=(new_h, new_w),
+                                mode='bilinear',
+                                align_corners=False
+                            ).squeeze(0)  # [C, H_new, W_new]
+                            new_pos_embed = new_pos_embed_2d.permute(1, 2, 0).unsqueeze(0)  # [1, H_new, W_new, C]
+                            checkpoint_state['image_encoder.pos_embed'] = new_pos_embed
+                            print(f"[INFO] Resized pos_embed from [{old_h}, {old_w}] to [{new_h}, {new_w}]")
+                        
+                        # Resize relative position embeddings
+                        # rel_pos_h and rel_pos_w have shape [2*H-1, head_dim] or [2*W-1, head_dim]
+                        for key in list(checkpoint_state.keys()):
+                            if 'rel_pos_h' in key or 'rel_pos_w' in key:
+                                old_rel_pos = checkpoint_state[key]
+                                if len(old_rel_pos.shape) == 2:
+                                    # Shape: [2*H-1, head_dim]
+                                    old_size = (old_rel_pos.shape[0] + 1) // 2
+                                    new_size = image_size // 16
+                                    new_rel_pos_size = 2 * new_size - 1
+                                    
+                                    # Interpolate relative position embeddings
+                                    # We need to handle the 1D nature of these embeddings
+                                    old_rel_pos_expanded = old_rel_pos.unsqueeze(0).unsqueeze(0)  # [1, 1, 2*H-1, head_dim]
+                                    new_rel_pos_expanded = torch.nn.functional.interpolate(
+                                        old_rel_pos_expanded.permute(0, 3, 1, 2),  # [1, head_dim, 1, 2*H-1]
+                                        size=(1, new_rel_pos_size),
+                                        mode='bilinear',
+                                        align_corners=False
+                                    ).permute(0, 2, 3, 1).squeeze(0).squeeze(0)  # [2*H_new-1, head_dim]
+                                    checkpoint_state[key] = new_rel_pos_expanded
+                                    print(f"[INFO] Resized {key} from [{old_rel_pos.shape[0]}] to [{new_rel_pos_size}]")
+                        
+                        # Load the resized state dict
+                        missing_keys, unexpected_keys = sam_model.load_state_dict(checkpoint_state, strict=False)
+                        if missing_keys:
+                            print(f"[WARNING] Missing keys when loading checkpoint: {len(missing_keys)} keys")
+                        if unexpected_keys:
+                            print(f"[WARNING] Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+                    else:
+                        # Normal loading path
+                        sam_model = sam_model_registry[try_model_type](checkpoint=checkpoint_to_use)
+                    
                     encoder = sam_model.image_encoder
                     print(f"[INFO] Successfully loaded SAM-Med2D {try_model_type} image encoder")
                     model_type = try_model_type  # Update to the successful type
