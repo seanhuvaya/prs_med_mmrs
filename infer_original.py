@@ -257,7 +257,18 @@ def load_model(args):
     model = model.to(args.device)
     model.eval()
     
-    print("✓ Model loaded successfully")
+    # Verify model components are loaded
+    print("\n✓ Model loaded successfully")
+    print(f"  - Image encoder: {'✓' if model.image_encoder is not None else '✗'}")
+    print(f"  - Mask decoder: {'✓' if model.mask_decoder is not None else '✗'}")
+    if model.image_encoder is not None:
+        # Check if image encoder has parameters (not just initialized)
+        num_params = sum(p.numel() for p in model.image_encoder.parameters())
+        print(f"  - Image encoder params: {num_params:,}")
+    if model.mask_decoder is not None:
+        num_params = sum(p.numel() for p in model.mask_decoder.parameters())
+        print(f"  - Mask decoder params: {num_params:,}")
+    
     return model, tokenizer, image_processor, config
 
 
@@ -323,8 +334,29 @@ def infer_single(
             )
     
     # Process outputs
+    # Debug: print raw output values for first few samples
+    if hasattr(infer_single, '_debug_count'):
+        infer_single._debug_count += 1
+    else:
+        infer_single._debug_count = 0
+    
+    if infer_single._debug_count < 3:
+        print(f"\n[DEBUG] Sample {infer_single._debug_count}:")
+        print(f"  output_mask shape: {output_mask.shape}")
+        print(f"  output_mask min/max/mean: {output_mask.min().item():.4f} / {output_mask.max().item():.4f} / {output_mask.mean().item():.4f}")
+        print(f"  output_mask std: {output_mask.std().item():.4f}")
+    
+    # Apply sigmoid to get probabilities
     mask_prob = torch.sigmoid(output_mask).cpu().numpy().squeeze()
-    mask_prob = (mask_prob - mask_prob.min()) / (mask_prob.max() - mask_prob.min() + 1e-8)
+    
+    if infer_single._debug_count < 3:
+        print(f"  After sigmoid - min/max/mean: {mask_prob.min():.4f} / {mask_prob.max():.4f} / {mask_prob.mean():.4f}")
+        print(f"  Non-zero pixels: {(mask_prob > 0.1).sum()} / {mask_prob.size}")
+    
+    # Don't normalize after sigmoid - sigmoid already gives [0,1] range
+    # The min-max normalization was destroying the signal if all values were similar
+    # Instead, just clip to [0,1] to ensure valid range
+    mask_prob = np.clip(mask_prob, 0.0, 1.0)
     
     # Decode text
     text_output = tokenizer.decode(output_ids[0, :], skip_special_tokens=True)
@@ -425,6 +457,19 @@ def main():
             )
             
             # Save mask
+            # Ensure mask_prob is 2D (H, W) for saving
+            if mask_prob.ndim > 2:
+                mask_prob = mask_prob.squeeze()
+            if mask_prob.ndim == 1:
+                # If somehow 1D, reshape (this shouldn't happen)
+                print(f"Warning: mask_prob is 1D with shape {mask_prob.shape}, skipping save")
+                continue
+            
+            # Debug first few masks
+            if idx < 3:
+                print(f"  Saving mask {idx}: shape={mask_prob.shape}, min={mask_prob.min():.4f}, max={mask_prob.max():.4f}, mean={mask_prob.mean():.4f}")
+                print(f"  Pixels > 0.5: {(mask_prob > 0.5).sum()} / {mask_prob.size}")
+            
             mask_uint8 = (mask_prob * 255).astype(np.uint8)
             mask_filename = f"pred_mask_{idx:05d}.png"
             mask_save_path = masks_dir / mask_filename
