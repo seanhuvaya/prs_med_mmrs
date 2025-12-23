@@ -2,15 +2,15 @@ import os
 import math
 import torch
 import torch.nn as nn
+import logging
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
-# Import from local llava module (self-contained)
 from llava.model.builder import load_pretrained_model
-from llava.mm_utils import get_model_name_from_path
 from llava.utils import disable_torch_init
 from tinysam import sam_model_registry
 
 from .decoder.mask_decoder_original import PromptedMaskDecoder
+from .vision_backbone.sam_med2d_encoder import SAMMed2DVisionBackbone
 
 
 def custom_lora_init(module):
@@ -21,10 +21,27 @@ def custom_lora_init(module):
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, model_type, checkpoint_path):
+    def __init__(self, model_type, checkpoint_path, encoder_type="tinysam", device="cuda:0", image_size=1024):
         super(ImageEncoder, self).__init__()
-        self.sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-        self.image_encoder = self.sam.image_encoder
+        self.encoder_type = encoder_type.lower() if encoder_type else "tinysam"
+        self.device = device
+        
+        if self.encoder_type in ("sam_med2d", "sammed2d"):
+            # Use SAM-Med2D encoder
+            # Infer model type from checkpoint path
+            sam_med2d_model_type = None  # Let SAMMed2DVisionBackbone auto-detect
+            logging.info(f"Initializing SAM-Med2D encoder with checkpoint: {checkpoint_path}")
+            self.image_encoder = SAMMed2DVisionBackbone(
+                checkpoint_path=checkpoint_path,
+                image_size=image_size,
+                device=device,
+                model_type=sam_med2d_model_type  # None = auto-detect from path
+            )
+        else:
+            # Use TinySAM encoder (default)
+            logging.info(f"Initializing TinySAM encoder with type {model_type} and checkpoint: {checkpoint_path}")
+            self.sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+            self.image_encoder = self.sam.image_encoder
 
     def forward(self, inputs):
         return self.image_encoder(inputs)
@@ -37,7 +54,8 @@ class LLMSeg(nn.Module):
             model_base=None, 
             load_8bit=False, 
             load_4bit=False, 
-            device="cuda:0"
+            device="cuda:0",
+            cls_num_out=6
         ):
 
         super(LLMSeg, self).__init__()
@@ -50,18 +68,9 @@ class LLMSeg(nn.Module):
             task_type=TaskType.CAUSAL_LM,
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
         )
-        
-        # Handle both Hugging Face model IDs and local paths
-        # Check if it's a Hugging Face model ID (contains '/' but not a local path)
-        is_hf_id = '/' in model_path and not os.path.isdir(model_path) and not os.path.isfile(model_path)
-        if is_hf_id:
-            # Hugging Face model ID (e.g., "microsoft/llava-med-v1.5-mistral-7b")
-            model_name = model_path.split('/')[-1]  # Extract model name from HF ID
-            print(f"Loading model from Hugging Face: {model_path}")
-        else:
-            # Local path
-            model_name = get_model_name_from_path(model_path)
-            print(f"Loading model from local path: {model_path}")
+
+        model_name = model_path.split('/')[-1]  # Extract model name from HF ID
+        logging.info(f"Loading model from Hugging Face: {model_path}")
         
         self.tokenizer, self.base_model, self.image_processor, self.context_len = load_pretrained_model(
             model_path,
@@ -85,16 +94,26 @@ class LLMSeg(nn.Module):
         self.cls = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(256, 6)
+            nn.Linear(256, cls_num_out)
         )
         torch.nn.init.xavier_uniform_(self.cls[2].weight)
         torch.nn.init.ones_(self.cls[2].bias)
 
-    def set_image_encoder(self, model_type, checkpoint_path):
-        """Set the image encoder after initialization"""
+    def set_image_encoder(self, model_type, checkpoint_path, encoder_type="tinysam", image_size=1024):
+        """Set the image encoder after initialization
+        
+        Args:
+            model_type: Model type string (e.g., "vit_t" for TinySAM, ignored for SAM-Med2D)
+            checkpoint_path: Path to the checkpoint file
+            encoder_type: "tinysam" or "sam_med2d" (default: "tinysam")
+            image_size: Input image size (default: 1024)
+        """
         self.image_encoder = ImageEncoder(
             model_type=model_type,
-            checkpoint_path=checkpoint_path
+            checkpoint_path=checkpoint_path,
+            encoder_type=encoder_type,
+            device=self.device,
+            image_size=image_size
         )
         self.image_encoder.train()
 
@@ -110,7 +129,7 @@ class LLMSeg(nn.Module):
         torch.save(self.cls.state_dict(), os.path.join(save_path, "cls.pth"))
 
     def load_model(self, load_path):
-        print("Loading model from:", load_path)
+        logging.info("Loading model from:", load_path)
         self.tokenizer = self.tokenizer.from_pretrained(os.path.join(load_path, "tokenizer"))
         self.mask_decoder.load_state_dict(torch.load(os.path.join(load_path, "mask_decoder.pth")))
         if self.image_encoder is not None:
@@ -131,7 +150,6 @@ class LLMSeg(nn.Module):
         image_tensor_for_vlm,
         image_tensor_for_image_enc,
         input_ids_for_seg=None,
-        attention_mask = None,
         temperature=0.1,
         max_new_tokens=512,
         top_p=0.95
@@ -139,7 +157,48 @@ class LLMSeg(nn.Module):
         self.image_encoder.eval()
         self.model.eval()
         self.mask_decoder.eval()
+        
+        # Ensure model is in float16 for inference (consistent with autocast)
+        # Check current dtype and convert if needed - this converts ALL submodules including mm_projector
+        model_dtype = next(self.model.parameters()).dtype
+        if model_dtype == torch.bfloat16 or model_dtype == torch.float32:
+            # Convert entire model (including all submodules) to float16 for inference
+            self.model = self.model.to(dtype=torch.float16)
+        
+        # Also ensure base_model is in float16 if it exists and is different
+        if hasattr(self, 'base_model') and self.base_model is not None:
+            base_dtype = next(self.base_model.parameters()).dtype
+            if base_dtype == torch.bfloat16 or base_dtype == torch.float32:
+                self.base_model = self.base_model.to(dtype=torch.float16)
+        
+        # CRITICAL: Explicitly convert vision tower to float16
+        # The vision tower outputs are converted back to input dtype in clip_encoder.py line 49,
+        # so we need to ensure both vision tower AND its inputs are in float16
+        try:
+            vision_tower = self.model.get_vision_tower() if hasattr(self.model, 'get_vision_tower') else None
+            if vision_tower is None and hasattr(self, 'base_model'):
+                vision_tower = self.base_model.get_vision_tower() if hasattr(self.base_model, 'get_vision_tower') else None
+            
+            if vision_tower is not None:
+                # Convert vision tower to float16
+                if hasattr(vision_tower, 'to'):
+                    vision_tower = vision_tower.to(dtype=torch.float16)
+                elif hasattr(vision_tower, 'vision_tower'):
+                    # Handle case where vision_tower is a wrapper
+                    if hasattr(vision_tower.vision_tower, 'to'):
+                        vision_tower.vision_tower = vision_tower.vision_tower.to(dtype=torch.float16)
+        except Exception as e:
+            # If vision tower conversion fails, log but continue (might not be critical)
+            import logging
+            logging.warning(f"Could not convert vision tower to float16: {e}")
+        
         with torch.no_grad():
+            # Ensure image_tensor_for_vlm is in float16 to match model
+            # Get dtype from model (should be float16 after conversion above)
+            target_dtype = next(self.model.parameters()).dtype
+            if image_tensor_for_vlm.dtype != target_dtype:
+                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=target_dtype)
+            
             output_ids = self.model.generate(
                 inputs = input_ids,
                 images = image_tensor_for_vlm,
@@ -151,7 +210,38 @@ class LLMSeg(nn.Module):
 
             image_embedding = self.image_encoder(image_tensor_for_image_enc)
             
-            prompt_embedding = self.base_model.extract_last_hidden_state(
+            # After load_model(), self.model has merged LoRA weights
+            # Use self.model if it has extract_last_hidden_state, otherwise use base_model
+            # This ensures we use the merged weights (important for correct inference)
+            if hasattr(self.model, 'extract_last_hidden_state'):
+                model_for_embedding = self.model
+            else:
+                # Fallback to base_model if merged model doesn't have the method
+                model_for_embedding = self.base_model
+            
+            # CRITICAL: Ensure image_tensor_for_vlm is in float16
+            # The vision tower converts outputs to match input dtype (clip_encoder.py line 49),
+            # so if images are float32, vision tower outputs will be float32, causing mismatch with mm_projector (float16)
+            target_dtype = next(model_for_embedding.parameters()).dtype
+            if image_tensor_for_vlm.dtype != target_dtype:
+                image_tensor_for_vlm = image_tensor_for_vlm.to(dtype=target_dtype)
+            
+            # Also ensure vision tower is in float16 to match
+            try:
+                vision_tower = model_for_embedding.get_vision_tower() if hasattr(model_for_embedding, 'get_vision_tower') else None
+                if vision_tower is not None:
+                    # Get the actual vision_tower object (might be wrapped)
+                    actual_tower = vision_tower.vision_tower if hasattr(vision_tower, 'vision_tower') else vision_tower
+                    if hasattr(actual_tower, 'to'):
+                        actual_tower_dtype = next(actual_tower.parameters()).dtype if hasattr(actual_tower, 'parameters') else None
+                        if actual_tower_dtype is not None and actual_tower_dtype != target_dtype:
+                            actual_tower = actual_tower.to(dtype=target_dtype)
+                            if hasattr(vision_tower, 'vision_tower'):
+                                vision_tower.vision_tower = actual_tower
+            except Exception:
+                pass  # If vision tower conversion fails, continue (images dtype should be enough)
+            
+            prompt_embedding = model_for_embedding.extract_last_hidden_state(
                 input_ids = input_ids_for_seg if input_ids_for_seg is not None else input_ids,
                 images = image_tensor_for_vlm,
                 do_sample=False,
@@ -159,6 +249,17 @@ class LLMSeg(nn.Module):
                 max_new_tokens=max_new_tokens,
                 top_p=top_p
             )["hidden_states"][-1]
+            
+            # Validate embeddings before passing to mask_decoder
+            if torch.isnan(prompt_embedding).any() or torch.isinf(prompt_embedding).any():
+                raise RuntimeError(
+                    f"NaN/Inf detected in prompt_embedding. "
+                    f"Shape: {prompt_embedding.shape}, "
+                    f"Model used: {'self.model' if hasattr(self.model, 'extract_last_hidden_state') else 'self.base_model'}"
+                )
+            if torch.isnan(image_embedding).any() or torch.isinf(image_embedding).any():
+                raise RuntimeError(f"NaN/Inf detected in image_embedding. Shape: {image_embedding.shape}")
+            
             final_mask = self.mask_decoder(
                 image_embedding, prompt_embedding
             )
@@ -221,18 +322,27 @@ def build_llm_seg(
         load_4bit=False, 
         device="cuda:0",
         sam_model_type="vit_t",
-        sam_checkpoint_path=None
+        sam_checkpoint_path=None,
+        encoder_type="tinysam",
+        image_size=1024,
+        cls_num_out=6
 ):
     llm_seg = LLMSeg(
         model_path=model_path,
         model_base=model_base,
         load_8bit=load_8bit,
         load_4bit=load_4bit,
-        device=device
+        device=device,
+        cls_num_out=cls_num_out
     )
     
     if sam_checkpoint_path is not None:
-        llm_seg.set_image_encoder(sam_model_type, sam_checkpoint_path)
+        llm_seg.set_image_encoder(
+            sam_model_type, 
+            sam_checkpoint_path,
+            encoder_type=encoder_type,
+            image_size=image_size
+        )
 
     tokenizer, image_processor, context_len, config = llm_seg.get_model_utils()
     return llm_seg, tokenizer, image_processor, config
