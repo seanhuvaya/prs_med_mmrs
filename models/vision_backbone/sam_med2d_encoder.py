@@ -515,13 +515,28 @@ class SAMMed2DVisionBackbone(nn.Module):
             )
 
         self.encoder = encoder.to(self.device)
-        self.sam_med2d_image_size = sam_med2d_image_size  # Store SAM-Med2D's native image size
-        self.target_image_size = image_size  # PRS-Med's target image size
+        
+        # Detect the model's actual image size from pos_embed (after loading checkpoint)
+        # The model was built with image_size=1024, so pos_embed should be 64x64
+        model_actual_image_size = None
+        model_pos_embed_shape = self.encoder.pos_embed.shape
+        if len(model_pos_embed_shape) == 4:
+            model_patch_h = model_pos_embed_shape[1]
+            model_actual_image_size = model_patch_h * 16  # patch_size = 16
+            print(f"[INFO] Model's actual image size (from pos_embed): {model_actual_image_size}x{model_actual_image_size} (patches: {model_patch_h}x{model_patch_h})")
+        
+        # Store sizes for forward pass
+        self.sam_med2d_image_size = sam_med2d_image_size  # SAM-Med2D's native training size (256)
+        self.model_image_size = model_actual_image_size if model_actual_image_size else image_size  # Model's actual expected size (1024)
+        self.target_image_size = image_size  # PRS-Med's target image size (1024)
 
-        # Detect output channels by running a dummy forward pass with SAM-Med2D's native size
+        # Detect output channels by running a dummy forward pass with model's actual image size
         encoder_channels = 1280  # sensible default
         with torch.no_grad():
-            dummy_input = torch.randn(1, 3, sam_med2d_image_size, sam_med2d_image_size).to(self.device)
+            # Use model's actual image size, not SAM-Med2D's native size
+            dummy_input_size = self.model_image_size
+            print(f"[INFO] Running dummy forward pass with image size: {dummy_input_size}x{dummy_input_size}")
+            dummy_input = torch.randn(1, 3, dummy_input_size, dummy_input_size).to(self.device)
             dummy_output = self.encoder(dummy_input)
 
             # Some SAM/SAM2 variants return dicts; extract the main image embedding
@@ -548,10 +563,10 @@ class SAMMed2DVisionBackbone(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
-        # Define preprocessing: resize to SAM-Med2D's native size (256x256), then normalize
-        # This ensures compatibility with SAM-Med2D's trained weights
+        # Define preprocessing: resize to model's actual expected size, then normalize
+        # The model expects model_image_size (typically 1024x1024 after loading)
         self.transform = transforms.Compose([
-            transforms.Resize((sam_med2d_image_size, sam_med2d_image_size)),
+            transforms.Resize((self.model_image_size, self.model_image_size)),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -561,19 +576,18 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         # Project to 256 channels to match TinySAM output
         self.output_proj = nn.Conv2d(encoder_channels, 256, kernel_size=1).to(self.device)
-        
-        # Store target size for output resizing if needed
-        self.target_image_size = image_size
 
     def forward(self, x):
         """
         Forward pass that wraps SAM-Med2D for PRS-Med compatibility.
         
-        SAM-Med2D expects 256x256 input, but PRS-Med uses 1024x1024.
+        The model was loaded with image_size=1024 (64x64 patches), so it expects 1024x1024 input.
+        PRS-Med also uses 1024x1024, so we just need to ensure proper normalization.
         This wrapper:
-        1. Resizes input from 1024x1024 to 256x256 (SAM-Med2D's native size)
-        2. Processes through SAM-Med2D encoder
-        3. Projects to 256 channels and resizes to 16x16 to match TinySAM output format
+        1. Resizes input to model's expected size (1024x1024) if needed
+        2. Normalizes with ImageNet stats
+        3. Processes through SAM encoder
+        4. Projects to 256 channels and resizes to 16x16 to match TinySAM output format
         """
         if isinstance(x, list):
             # Handle PIL images or tensors in list
@@ -583,10 +597,10 @@ class SAMMed2DVisionBackbone(nn.Module):
                     # If tensor, resize and normalize
                     if img.dim() == 3:
                         img = img.unsqueeze(0)
-                    # Resize to SAM-Med2D's native size
+                    # Resize to model's expected size (1024x1024)
                     img = torch.nn.functional.interpolate(
                         img, 
-                        size=(self.sam_med2d_image_size, self.sam_med2d_image_size),
+                        size=(self.model_image_size, self.model_image_size),
                         mode='bilinear',
                         align_corners=False
                     )
@@ -598,17 +612,19 @@ class SAMMed2DVisionBackbone(nn.Module):
                     img = (img - mean) / std
                     processed.append(img.squeeze(0))
                 else:
-                    processed.append(self.transform(img))
+                    # For PIL images, use transform which resizes to model_image_size
+                    img_tensor = self.transform(img)
+                    processed.append(img_tensor)
             x = torch.stack(processed)
         elif isinstance(x, torch.Tensor):
             # Handle tensor input
             original_size = x.shape[-2:]
             
-            # Resize to SAM-Med2D's native size (256x256) if needed
-            if original_size != (self.sam_med2d_image_size, self.sam_med2d_image_size):
+            # Resize to model's expected size (1024x1024) if needed
+            if original_size != (self.model_image_size, self.model_image_size):
                 x = torch.nn.functional.interpolate(
                     x,
-                    size=(self.sam_med2d_image_size, self.sam_med2d_image_size),
+                    size=(self.model_image_size, self.model_image_size),
                     mode='bilinear',
                     align_corners=False
                 )
@@ -623,7 +639,7 @@ class SAMMed2DVisionBackbone(nn.Module):
 
         x = x.to(self.device)
 
-        # Forward through SAM-Med2D encoder (expects 256x256 input)
+        # Forward through SAM encoder (expects model_image_size x model_image_size input, typically 1024x1024)
         with torch.set_grad_enabled(self.training):
             z_image = self.encoder(x)
 
