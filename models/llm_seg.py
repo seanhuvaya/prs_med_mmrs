@@ -9,7 +9,7 @@ from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from tinysam import sam_model_registry
 
-from .decoder.mask_decoder_original import PromptedMaskDecoder
+from .decoder.mask_decoder import PromptedMaskDecoder
 from .vision_backbone.sam_med2d_encoder import SAMMed2DVisionBackbone
 
 

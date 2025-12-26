@@ -11,7 +11,7 @@ from pathlib import Path
 
 from models.llm_seg_original import build_llm_seg
 from data.dataset import PromptSegmentDataset, collate_fn
-from models.loss.original_loss import structure_loss, dice_score, BceDiceLoss
+from models.loss.objective_function import structure_loss, dice_score, BceDiceLoss
 from llava.utils import disable_torch_init
 
 
